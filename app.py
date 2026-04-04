@@ -243,20 +243,46 @@ def get_quote(stock_id: str) -> dict:
 # --- 7. FinMind 盤中動能分析（只在觸發門檻瞬間呼叫）---
 # ===========================================================================
 
-def fetch_momentum_analysis(stock_id: str) -> dict:
+def classify_short_implication(pct: float, ratio: float, tg_threshold: float) -> str:
     """
-    抓取該股票最近 10 根 1 分 K，計算：
+    四種短線意涵判斷：
+    1. 上漲達門檻 + 放量(ratio >= 1.5) → 帶量突破
+    2. 上漲達門檻 + 縮量(ratio <  1.0) → 虛假拉抬
+    3. 下跌達門檻 + 放量(ratio >= 1.5) → 帶量殺盤
+    4. 下跌達門檻 + 縮量(ratio <  1.0) → 洗盤觀察
+    其餘情況回傳空字串。
+    """
+    is_up   = pct >= tg_threshold
+    is_down = pct <= -tg_threshold
+    is_vol_up   = ratio >= 1.5
+    is_vol_down = ratio <  1.0
+
+    if is_up and is_vol_up:
+        return "🚀 短線意涵：帶量突破"
+    elif is_up and is_vol_down:
+        return "⚠️ 短線意涵：虛假拉抬"
+    elif is_down and is_vol_up:
+        return "💣 短線意涵：帶量殺盤"
+    elif is_down and is_vol_down:
+        return "🔍 短線意涵：洗盤觀察"
+    return ""
+
+
+def fetch_momentum_analysis(stock_id: str, pct: float = 0.0,
+                             tg_threshold: float = 3.0) -> dict:
+    """
+    抓取該股票最近 6 根 1 分 K，計算：
     - 當前成交量（最新一根）
     - 前 5 分鐘均量
     - 量能比（當前量 / 均量）
     - 動能判斷標籤
+    - 短線意涵（四種情境）
     回傳 dict，失敗回傳空 dict。
     """
     try:
         dl    = get_finmind_loader()
         today = today_str()
 
-        # 抓取今日 1 分 K（TaiwanStockKBar）
         df = dl.taiwan_stock_minute(
             stock_id   = stock_id,
             start_date = today,
@@ -265,7 +291,6 @@ def fetch_momentum_analysis(stock_id: str) -> dict:
         if df is None or df.empty:
             return {}
 
-        # 確保有成交量欄位
         vol_col = None
         for col in ["volume", "Volume", "vol"]:
             if col in df.columns:
@@ -277,29 +302,31 @@ def fetch_momentum_analysis(stock_id: str) -> dict:
         df = df.sort_values("date") if "date" in df.columns else df
         df[vol_col] = pd.to_numeric(df[vol_col], errors="coerce").fillna(0)
 
-        # 取最後 6 根（1根當前 + 5根計算均量）
         recent = df.tail(6)
         if len(recent) < 2:
             return {}
 
-        cur_vol  = float(recent.iloc[-1][vol_col])          # 當前這分鐘成交量
-        avg_vol  = float(recent.iloc[:-1][vol_col].mean())  # 前 5 分鐘均量
-        ratio    = cur_vol / avg_vol if avg_vol > 0 else 0
+        cur_vol = float(recent.iloc[-1][vol_col])
+        avg_vol = float(recent.iloc[:-1][vol_col].mean())
+        ratio   = cur_vol / avg_vol if avg_vol > 0 else 0.0
 
         if ratio >= 2.0:
-            momentum_label = "🔥 爆量（當前量 {:.0f}%，均量 {:.0f}x）".format(ratio * 100, ratio)
+            momentum_label = "🔥 爆量（{:.1f} 倍均量）".format(ratio)
         elif ratio >= 1.5:
-            momentum_label = "📈 放量（當前量為均量 {:.1f} 倍）".format(ratio)
-        elif ratio >= 0.8:
+            momentum_label = "📈 放量（{:.1f} 倍均量）".format(ratio)
+        elif ratio >= 1.0:
             momentum_label = "➡️ 量能正常（{:.1f} 倍均量）".format(ratio)
         else:
-            momentum_label = "📉 縮量（當前量僅均量 {:.0f}%）".format(ratio * 100)
+            momentum_label = "📉 縮量（均量 {:.0f}%）".format(ratio * 100)
+
+        short_impl = classify_short_implication(pct, ratio, tg_threshold)
 
         return {
             "cur_vol":        int(cur_vol),
             "avg_vol":        int(avg_vol),
             "ratio":          round(ratio, 2),
             "momentum_label": momentum_label,
+            "short_impl":     short_impl,
         }
     except Exception as e:
         return {"error": str(e)}
@@ -535,32 +562,36 @@ def check_and_notify(bid: str, stock: dict, pct: float, res: dict,
             s["momentum"]   = {}
             label = "🔓 已重置（漲跌 {:.2f}%，回落至重置門檻 {:.1f}% 以下）".format(pct, tg_reset)
         else:
-            at  = s["alerted_at"]
-            mom = s.get("momentum", {})
-            mom_txt = mom.get("momentum_label", "") if mom else ""
+            at         = s["alerted_at"]
+            mom        = s.get("momentum", {})
+            mom_txt    = mom.get("momentum_label", "") if mom else ""
+            short_impl = mom.get("short_impl", "") if mom else ""
             label = "🔒 鎖定中（{} 已發送，需回落至 {:.1f}% 以下）".format(at, tg_reset)
             if mom_txt:
                 label += "　" + mom_txt
+            if short_impl:
+                label += "　" + short_impl
     else:
         # 未鎖定：檢查是否達到觸發門檻
         if abs_pct >= tg_threshold:
             direction = "📈 上漲" if pct > 0 else "📉 下跌"
 
             # ── 觸發瞬間才呼叫 FinMind 抓盤中動能 ──
-            momentum = fetch_momentum_analysis(stock_id)
+            momentum = fetch_momentum_analysis(stock_id, pct=pct, tg_threshold=tg_threshold)
             s["momentum"] = momentum
 
             mom_line = ""
             if momentum and "momentum_label" in momentum:
-                cur_v = momentum.get("cur_vol", 0)
-                avg_v = momentum.get("avg_vol", 0)
-                ratio = momentum.get("ratio", 0)
+                cur_v      = momentum.get("cur_vol", 0)
+                avg_v      = momentum.get("avg_vol", 0)
+                ratio      = momentum.get("ratio", 0)
+                short_impl = momentum.get("short_impl", "")
+                impl_line  = "\n" + short_impl if short_impl else ""
                 mom_line = (
                     "\n\n<b>📊 盤中動能分析</b>\n"
                     "當前量：{:,} 張　前5分均量：{:,} 張\n"
-                    "量能比：{:.1f} 倍　{}".format(
-                        cur_v, avg_v, ratio, momentum["momentum_label"])
-                )
+                    "量能比：{:.1f} 倍　{}{}"
+                ).format(cur_v, avg_v, ratio, momentum["momentum_label"], impl_line)
             elif momentum.get("error"):
                 mom_line = "\n\n📊 動能分析：取得失敗（{}）".format(momentum["error"])
 
@@ -591,6 +622,9 @@ def check_and_notify(bid: str, stock: dict, pct: float, res: dict,
             label = "✅ 已發送通知（{}，漲跌 {:+.2f}%）".format(s["alerted_at"], pct)
             if momentum and "momentum_label" in momentum:
                 label += "　" + momentum["momentum_label"]
+            short_impl_sent = momentum.get("short_impl", "") if momentum else ""
+            if short_impl_sent:
+                label += "　" + short_impl_sent
         else:
             label = "⚪ 監控中（{:+.2f}%，門檻 ±{:.1f}%）".format(pct, tg_threshold)
 
@@ -793,7 +827,16 @@ for idx, stock in enumerate(st.session_state.my_stocks):
                 indicators = "　".join(res["details"]) if res["details"] else "無"
                 st.markdown("符合指標：{}".format(indicators))
                 st.caption("KD 值：K={:.1f} / D={:.1f}".format(res["k"], res["d"]))
-                st.caption("通知狀態：{}".format(alert_label))
+                # 從 alert_state 取出短線意涵，直接接在通知狀態後面
+                _astate  = load_alert_state(browser_id)
+                _astates = _astate.get("states", {})
+                _smom    = _astates.get(stock["id"], {}).get("momentum", {})
+                _simpl   = _smom.get("short_impl", "") if _smom else ""
+                if _simpl and is_market_open():
+                    full_label = "{}　{}".format(alert_label, _simpl)
+                else:
+                    full_label = alert_label
+                st.caption("通知狀態：{}".format(full_label))
             with col_metric:
                 st.metric("股價", "{:.2f}".format(res["price"]),
                           "{:+.2f}%".format(res["pct"]), delta_color="inverse")
