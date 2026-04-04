@@ -607,3 +607,403 @@ def fetch_and_analyze(stock_id: str):
     if is_market_open():
         quote = get_quote(stock_id)
         pct   = quote.get("pct", 0.0) if quote else 0.0
+        price = quote.get("price", float(last["Close"])) if quote else float(last["Close"])
+    else:
+        pct   = (float(last["Close"]) - float(prev["Close"])) / float(prev["Close"]) * 100
+        price = float(last["Close"])
+
+    return {
+        "price":   price,
+        "pct":     pct,
+        "grade":   grade, "action": action, "color": color,
+        "details": details, "score": score,
+        "k":       float(last["K"]), "d": float(last["D"]),
+        "source":  source,
+        "hist_df": hist_df,   # 供盤後 5MAV 計算使用
+    }
+
+
+# ===========================================================================
+# --- 15. 通知邏輯（觸發時順帶抓 FinMind 動能）---
+# ===========================================================================
+
+def send_telegram(tg_token: str, tg_chat_id: str, msg: str):
+    try:
+        requests.post(
+            "https://api.telegram.org/bot" + tg_token + "/sendMessage",
+            json={"chat_id": tg_chat_id, "text": msg, "parse_mode": "HTML"},
+            timeout=5,
+        )
+    except Exception:
+        pass
+
+
+def check_and_notify(bid: str, stock: dict, pct: float, res: dict,
+                     tg_token: str, tg_chat_id: str,
+                     tg_threshold: float, tg_reset: float) -> str:
+    """
+    雙門檻通知邏輯。
+    觸發時同步呼叫 FinMind 盤中動能分析，一併附在通知內。
+    回傳通知狀態標籤（供 UI 顯示）。
+    """
+    if not tg_token or not tg_chat_id:
+        return "⚪ 未設定通知"
+
+    alert_state = load_alert_state(bid)
+    stock_id    = stock["id"]
+    states      = alert_state.setdefault("states", {})
+    s           = states.setdefault(stock_id, {
+        "alerted": False, "last_pct": 0.0, "alerted_at": "",
+        "momentum": {},
+    })
+
+    abs_pct = abs(pct)
+    label   = ""
+
+    if s["alerted"]:
+        # 已鎖定：檢查是否達到重置門檻
+        if abs_pct <= tg_reset:
+            s["alerted"]    = False
+            s["alerted_at"] = ""
+            s["momentum"]   = {}
+            label = "🔓 已重置（漲跌 {:.2f}%，回落至重置門檻 {:.1f}% 以下）".format(pct, tg_reset)
+        else:
+            at         = s["alerted_at"]
+            mom        = s.get("momentum", {})
+            mom_txt    = mom.get("momentum_label", "") if mom else ""
+            short_impl = mom.get("short_impl", "") if mom else ""
+            label = "🔒 鎖定中（{} 已發送，需回落至 {:.1f}% 以下）".format(at, tg_reset)
+            if mom_txt:
+                label += "　" + mom_txt
+            if short_impl:
+                label += "　" + short_impl
+    else:
+        # 未鎖定：檢查是否達到觸發門檻
+        if abs_pct >= tg_threshold:
+            direction = "📈 上漲" if pct > 0 else "📉 下跌"
+
+            # ── 觸發瞬間才呼叫 FinMind 抓盤中動能 ──
+            momentum = fetch_momentum_analysis(stock_id, pct=pct, tg_threshold=tg_threshold)
+            s["momentum"] = momentum
+
+            mom_line = ""
+            if momentum and "momentum_label" in momentum:
+                cur_v      = momentum.get("cur_vol", 0)
+                avg_v      = momentum.get("avg_vol", 0)
+                ratio      = momentum.get("ratio", 0)
+                short_impl = momentum.get("short_impl", "")
+                impl_line  = "\n" + short_impl if short_impl else ""
+                mom_line = (
+                    "\n\n<b>📊 盤中動能分析</b>\n"
+                    "當前量：{:,} 張　前5分均量：{:,} 張\n"
+                    "量能比：{:.1f} 倍　{}{}"
+                ).format(cur_v, avg_v, ratio, momentum["momentum_label"], impl_line)
+            elif momentum.get("error"):
+                mom_line = "\n\n📊 動能分析：取得失敗（{}）".format(momentum["error"])
+
+            name   = stock["name"]
+            price  = res["price"]
+            grade  = res["grade"]
+            action = res["action"]
+            inds   = ", ".join(res["details"]) if res["details"] else "無"
+            thresh = tg_threshold
+            reset  = tg_reset
+
+            msg = (
+                "🔔 <b>【價格異動通知】</b>\n\n"
+                "標的：<b>{} ({})</b>\n"
+                "目前股價：<b>{:.2f}</b>\n"
+                "今日漲跌：<b>{:+.2f}%</b> {}\n"
+                "技術評級：{}\n"
+                "建議決策：<b>{}</b>\n\n"
+                "符合指標：{}\n\n"
+                "⚠️ 觸發門檻：{}%　重置門檻：{}%"
+                "{}"
+            ).format(name, stock_id, price, pct, direction,
+                     grade, action, inds, thresh, reset, mom_line)
+
+            send_telegram(tg_token, tg_chat_id, msg)
+            s["alerted"]        = True
+            s["alerted_at"]     = now_tw().strftime("%H:%M")
+            s["ever_triggered"] = True   # 今日曾觸發，盤後分析用，重置後仍保留
+            label = "✅ 已發送通知（{}，漲跌 {:+.2f}%）".format(s["alerted_at"], pct)
+            if momentum and "momentum_label" in momentum:
+                label += "　" + momentum["momentum_label"]
+            short_impl_sent = momentum.get("short_impl", "") if momentum else ""
+            if short_impl_sent:
+                label += "　" + short_impl_sent
+        else:
+            label = "⚪ 監控中（{:+.2f}%，門檻 ±{:.1f}%）".format(pct, tg_threshold)
+
+    s["last_pct"] = pct
+    save_alert_state(bid, alert_state)
+    return label
+
+
+# ===========================================================================
+# --- 16. 介面 ---
+# ===========================================================================
+st.set_page_config(page_title="台股決策系統 V7.5", layout="centered")
+st.title("🤖 台股 AI 技術分級決策支援")
+
+# ── browser_id 初始化 ─────────────────────────────────────────────────────
+if not browser_id:
+    get_browser_id_component()
+    st.info("⏳ 初始化中，請稍候...")
+    st.stop()
+
+# ── 開盤中自動每 60 秒刷新 ───────────────────────────────────────────────
+if is_market_open():
+    components.html("""
+    <script>
+    setTimeout(function() { window.parent.location.reload(); }, 60000);
+    </script>
+    """, height=0)
+    st.success(
+        "🟢 **開盤中** — 每 60 秒自動更新｜"
+        "報價來自 TaiwanStockQuote（低成本掃描），"
+        "觸發門檻時才呼叫 FinMind 動能分析"
+    )
+else:
+    st.info("🔵 **非開盤時間**（{}）— 使用 yfinance 歷史快取".format(now_tw().strftime("%H:%M")))
+
+st.caption("📌 您的專屬清單已儲存於此瀏覽器，重新整理或關閉後仍會保留。")
+
+# ── 新增自選股票 ──────────────────────────────────────────────────────────
+with st.container(border=True):
+    st.subheader("🔍 新增自選股票")
+    c1, c2, c3 = st.columns([2, 3, 1.2])
+    input_id   = c1.text_input("代號", key="add_id")
+    input_name = c2.text_input("名稱", key="add_name")
+    if c3.button("➕ 新增", use_container_width=True):
+        if input_id and input_name:
+            if not any(s["id"] == input_id for s in st.session_state.my_stocks):
+                st.session_state.my_stocks.append({"id": input_id, "name": input_name})
+                save_user_stocks(browser_id, st.session_state.my_stocks)
+                st.rerun()
+
+# ── Sidebar ───────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.header("⚙️ 設定")
+
+    st.subheader("📡 FinMind")
+    st.session_state.finmind_token = st.text_input(
+        "API Token（選填）", type="password",
+        value=st.session_state.finmind_token,
+        help=(
+            "用於 TaiwanStockQuote 全市場掃描 及 觸發時的盤中動能分析。\n"
+            "未填使用免費版（有速率限制）。"
+        ),
+    )
+
+    st.divider()
+
+    st.subheader("🔔 Telegram 通知")
+    st.session_state.tg_token   = st.text_input(
+        "Bot Token", type="password", value=st.session_state.tg_token)
+    st.session_state.tg_chat_id = st.text_input(
+        "Chat ID", value=st.session_state.tg_chat_id)
+
+    st.markdown("**門檻設定**")
+    col_a, col_b = st.columns(2)
+    st.session_state.tg_threshold = col_a.number_input(
+        "觸發門檻 (%)", min_value=0.1, max_value=20.0,
+        value=float(st.session_state.tg_threshold), step=0.5,
+        help="漲跌幅達到此值時：發送 Telegram 通知 + 抓 FinMind 動能分析。",
+    )
+    st.session_state.tg_reset = col_b.number_input(
+        "重置門檻 (%)", min_value=0.1, max_value=20.0,
+        value=float(st.session_state.tg_reset), step=0.5,
+        help="鎖定後，漲跌幅回落至此值以下才解鎖，等待下次觸發。",
+    )
+
+    if st.session_state.tg_reset >= st.session_state.tg_threshold:
+        st.warning("⚠️ 重置門檻必須小於觸發門檻")
+    else:
+        buf = st.session_state.tg_threshold - st.session_state.tg_reset
+        st.caption(
+            "緩衝區 ±{:.1f}%　（觸發 {}% → 需回落至 {}% 才重置）".format(
+                buf, st.session_state.tg_threshold, st.session_state.tg_reset)
+        )
+
+    if st.button("💾 儲存設定"):
+        if st.session_state.tg_reset < st.session_state.tg_threshold:
+            save_tg_config()
+            st.success("已儲存")
+        else:
+            st.error("重置門檻必須小於觸發門檻，請修正後再儲存。")
+
+    st.divider()
+
+    # 手動掃描（強制發送，不受鎖定影響）
+    if st.button("🚀 手動掃描並發送通知", use_container_width=True):
+        st.cache_data.clear()
+        found = 0
+        for s in st.session_state.my_stocks:
+            res = fetch_and_analyze(s["id"])
+            if res and abs(res["pct"]) >= st.session_state.tg_threshold:
+                name   = s["name"]
+                sid    = s["id"]
+                price  = res["price"]
+                pct_v  = res["pct"]
+                grade  = res["grade"]
+                action = res["action"]
+                inds   = ", ".join(res["details"]) if res["details"] else "無"
+                msg = (
+                    "🔔 <b>【手動掃描通知】</b>\n\n"
+                    "標的：<b>{} ({})</b>\n"
+                    "目前股價：<b>{:.2f}</b>\n"
+                    "今日漲跌：<b>{:+.2f}%</b>\n"
+                    "技術評級：{}\n"
+                    "建議決策：<b>{}</b>\n\n"
+                    "符合指標：{}"
+                ).format(name, sid, price, pct_v, grade, action, inds)
+                send_telegram(st.session_state.tg_token, st.session_state.tg_chat_id, msg)
+                found += 1
+        st.success("掃描完成，已發送 {} 則通知".format(found))
+
+    st.divider()
+    with st.expander("📖 資料來源說明"):
+        st.markdown("""
+**開盤中掃描流程（每 60 秒）**
+1. `TaiwanStockQuote` 一次抓全市場即時報價（低成本）
+2. 用報價縫合今日棒到歷史 K 線，計算技術指標
+3. 掃描使用者清單是否觸及門檻
+4. **觸發瞬間才呼叫 FinMind** 抓 1 分 K，分析盤中動能
+
+**非開盤**：只用 yfinance 歷史快取，完全不呼叫 FinMind。
+        """)
+    with st.expander("📖 門檻說明"):
+        st.markdown("""
+**觸發門檻**：漲跌幅達到設定值，且未鎖定 → 發送 Telegram + 附上動能分析，進入鎖定。
+
+**重置門檻**：鎖定後漲跌幅回落至此值以下 → 解鎖，等待下次觸發。
+
+**緩衝區**：兩者之間的區間，避免在門檻附近震盪時重複通知。
+        """)
+    with st.expander("📖 KD 金叉說明"):
+        st.markdown("""
+1. 真實交叉：前 K ≤ D，本根 K > D
+2. 幅度 ≥ 1（排除噪音假叉）
+3. KD < 20 → 低檔金叉 ✅　20~79 → 標準金叉 ✅　≥ 80 → 高檔鈍化 ❌
+        """)
+    with st.expander("📖 盤後意涵說明"):
+        st.markdown("""
+**顯示時機**：收盤後 14:00 起（FinMind 資料此時較完整）
+
+**5 日均量基準（5MAV）**：取今天以前連續 5 個交易日的成交量平均。
+
+**四種判斷**：
+
+| 漲跌 | 量能 | 意涵 |
+|---|---|---|
+| 上漲達門檻 | 收盤量 > 5MAV × 1.1 | 📈 量增上漲，可考慮留倉 |
+| 上漲達門檻 | 收盤量 < 5MAV × 0.9 | ⚠️ 量縮上漲，不宜追高 |
+| 下跌達門檻 | 收盤量 > 5MAV × 1.1 | 💣 趨勢轉弱，建議避開 |
+| 下跌達門檻 | 收盤量 < 5MAV × 0.9 | 🔍 量縮下跌，可尋買點 |
+
+**Telegram**：每日每檔只發一次，不重複通知。
+        """)
+
+# ── 股票清單 ──────────────────────────────────────────────────────────────
+st.divider()
+
+tg_ok = (
+    bool(st.session_state.tg_token) and
+    bool(st.session_state.tg_chat_id) and
+    st.session_state.tg_reset < st.session_state.tg_threshold
+)
+
+for idx, stock in enumerate(st.session_state.my_stocks):
+    res = fetch_and_analyze(stock["id"])
+    if res:
+        # 開盤中自動執行通知邏輯（包含觸發時的 FinMind 動能分析）
+        if is_market_open() and tg_ok:
+            alert_label = check_and_notify(
+                bid          = browser_id,
+                stock        = stock,
+                pct          = res["pct"],
+                res          = res,
+                tg_token     = st.session_state.tg_token,
+                tg_chat_id   = st.session_state.tg_chat_id,
+                tg_threshold = st.session_state.tg_threshold,
+                tg_reset     = st.session_state.tg_reset,
+            )
+        elif not is_market_open():
+            alert_label = "🔵 非開盤時間，通知暫停"
+        else:
+            alert_label = "⚪ 請先設定 Telegram Token 與 Chat ID"
+
+        with st.container(border=True):
+            col_info, col_metric, col_del = st.columns([3, 2, 0.6])
+            with col_info:
+                name = stock["name"]
+                sid  = stock["id"]
+                st.write("### {} ({})".format(name, sid))
+                st.caption("資料來源：{}".format(res["source"]))
+                st.markdown("評級：`{}`".format(res["grade"]))
+                color  = res["color"]
+                action = res["action"]
+                st.markdown(
+                    "**建議決策：<span style='color:{}'>{}</span>**".format(color, action),
+                    unsafe_allow_html=True,
+                )
+                indicators = "　".join(res["details"]) if res["details"] else "無"
+                st.markdown("符合指標：{}".format(indicators))
+                st.caption("KD 值：K={:.1f} / D={:.1f}".format(res["k"], res["d"]))
+                # 從 alert_state 取出短線意涵，直接接在通知狀態後面
+                _astate  = load_alert_state(browser_id)
+                _astates = _astate.get("states", {})
+                _smom    = _astates.get(stock["id"], {}).get("momentum", {})
+                _simpl   = _smom.get("short_impl", "") if _smom else ""
+                if _simpl and is_market_open():
+                    full_label = "{}　{}".format(alert_label, _simpl)
+                else:
+                    full_label = alert_label
+                st.caption("通知狀態：{}".format(full_label))
+
+                # ── 盤後意涵（14:00 後才顯示）──
+                if is_after_hours():
+                    # 判斷該股今天是否曾觸發門檻（ever_triggered 重置後仍保留）
+                    _ah_astate   = load_alert_state(browser_id)
+                    _ah_s        = _ah_astate.get("states", {}).get(stock["id"], {})
+                    _ever        = _ah_s.get("ever_triggered", False)
+                    # session 內手動強制顯示旗標（測試用）
+                    _force_key   = "ah_force_" + stock["id"]
+                    _force       = st.session_state.get(_force_key, False)
+
+                    if _ever or _force:
+                        hist_df_for_ah = res.get("hist_df", pd.DataFrame())
+                        ah_impl = run_afterhours_analysis(
+                            bid          = browser_id,
+                            stock        = stock,
+                            pct          = res["pct"],
+                            hist_df      = hist_df_for_ah,
+                            tg_threshold = st.session_state.tg_threshold,
+                        )
+                        if ah_impl:
+                            st.caption(ah_impl)
+                        else:
+                            st.caption("📊 盤後意涵：資料取得中，請稍後重新整理")
+                    else:
+                        # 提供手動觸發按鈕（方便測試或門檻剛調整的情況）
+                        if st.button("🔍 手動查詢盤後意涵", key="ah_btn_" + stock["id"]):
+                            st.session_state[_force_key] = True
+                            st.rerun()
+            with col_metric:
+                st.metric("股價", "{:.2f}".format(res["price"]),
+                          "{:+.2f}%".format(res["pct"]), delta_color="inverse")
+            with col_del:
+                if st.button("🗑️", key="del_" + stock["id"]):
+                    st.session_state.my_stocks.pop(idx)
+                    save_user_stocks(browser_id, st.session_state.my_stocks)
+                    st.rerun()
+    else:
+        with st.container(border=True):
+            name = stock["name"]
+            sid  = stock["id"]
+            st.warning("⚠️ **{} ({})** 資料抓取失敗，請確認代號或稍後再試。".format(name, sid))
+
+if st.button("🔄 手動重新整理"):
+    st.cache_data.clear()
+    st.rerun()
