@@ -1,4 +1,3 @@
-
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -982,7 +981,42 @@ for idx, stock in enumerate(st.session_state.my_stocks):
                 st.caption("通知狀態：{}".format(full_label))
 
                 # ── 盤後意涵（14:00 後對所有自選股顯示）──
-                if is_after_hours():
+                # 除錯資訊（確認每個步驟狀態）
+                _now_time  = now_tw().strftime("%H:%M")
+                _ah_check  = is_after_hours()
+                _hist_ok   = not res.get("hist_df", pd.DataFrame()).empty
+                _pct_val   = res["pct"]
+                _thresh    = st.session_state.tg_threshold
+
+                with st.expander("🛠 盤後除錯資訊（確認後可移除）"):
+                    st.write("現在時間：", _now_time)
+                    st.write("is_after_hours()：", _ah_check)
+                    st.write("hist_df 有資料：", _hist_ok)
+                    st.write("今日漲跌幅：", round(_pct_val, 2), "%")
+                    st.write("觸發門檻設定：", _thresh, "%")
+
+                    if _ah_check:
+                        # 逐步執行並顯示每步結果
+                        _dbg_df   = res.get("hist_df", pd.DataFrame())
+                        _dbg_mav5 = get_5mav_from_history(_dbg_df)
+                        st.write("5MAV（5日均量）：", int(_dbg_mav5), "張")
+
+                        _dbg_vol = fetch_finmind_close_volume(stock["id"])
+                        st.write("FinMind 收盤量：", int(_dbg_vol), "張")
+
+                        if _dbg_mav5 > 0 and _dbg_vol > 0:
+                            _dbg_ratio = _dbg_vol / _dbg_mav5
+                            st.write("量比：", round(_dbg_ratio, 2), "倍")
+                            _dbg_impl = classify_afterhours_implication(
+                                _pct_val, _dbg_vol, _dbg_mav5, _thresh)
+                            st.write("classify_afterhours_implication 結果：",
+                                     _dbg_impl if _dbg_impl else "（空字串，未符合任何條件）")
+                        else:
+                            st.write("⚠️ mav5 或 close_vol 為 0，無法計算意涵")
+                    else:
+                        st.write("⚠️ is_after_hours() = False，盤後邏輯未執行")
+
+                if _ah_check:
                     hist_df_for_ah = res.get("hist_df", pd.DataFrame())
                     ah_impl = run_afterhours_analysis(
                         bid          = browser_id,
@@ -994,11 +1028,10 @@ for idx, stock in enumerate(st.session_state.my_stocks):
                     if ah_impl:
                         st.caption(ah_impl)
                     else:
-                        # 顯示量能數據即使無四種意涵（漲跌未達門檻 or 量能中性）
-                        _ah_s   = load_alert_state(browser_id).get("states", {}).get(stock["id"], {})
-                        _ratio  = _ah_s.get("ah_ratio", 0)
-                        _vol    = _ah_s.get("ah_vol", 0)
-                        _mav5   = _ah_s.get("ah_mav5", 0)
+                        _ah_s  = load_alert_state(browser_id).get("states", {}).get(stock["id"], {})
+                        _ratio = _ah_s.get("ah_ratio", 0)
+                        _vol   = _ah_s.get("ah_vol", 0)
+                        _mav5  = _ah_s.get("ah_mav5", 0)
                         if _vol > 0 and _mav5 > 0:
                             st.caption(
                                 "📊 盤後量能：收盤量 {:,} 張　5日均量 {:,} 張　量比 {:.2f} 倍".format(
