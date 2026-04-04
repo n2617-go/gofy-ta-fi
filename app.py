@@ -16,8 +16,9 @@ from ta.volatility import BollingerBands
 # --- 0. 基礎設定 ---
 # ===========================================================================
 tw_tz         = pytz.timezone("Asia/Taipei")
-MARKET_OPEN   = dt_time(9, 0)
-MARKET_CLOSE  = dt_time(13, 30)
+MARKET_OPEN      = dt_time(9, 0)
+MARKET_CLOSE     = dt_time(13, 30)
+AFTERHOURS_START = dt_time(14, 0)   # 盤後意涵開始顯示時間
 TG_SAVE_FILE  = "tg_config.json"
 USER_DATA_DIR = "user_data"
 ALERT_DIR     = "alert_state"
@@ -37,6 +38,14 @@ def is_market_open() -> bool:
     if n.weekday() >= 5:
         return False
     return MARKET_OPEN <= n.time() <= MARKET_CLOSE
+
+
+def is_after_hours() -> bool:
+    """收盤後且 >= 14:00 才顯示盤後意涵（FinMind 資料此時較完整）"""
+    n = now_tw()
+    if n.weekday() >= 5:
+        return False
+    return n.time() >= AFTERHOURS_START and n.time() > MARKET_CLOSE
 
 
 def today_str() -> str:
@@ -333,7 +342,103 @@ def fetch_momentum_analysis(stock_id: str, pct: float = 0.0,
 
 
 # ===========================================================================
-# --- 8. 歷史資料快取（yfinance，跨日才重抓）---
+# --- 8. 盤後意涵分析 ---
+# ===========================================================================
+
+
+
+
+def get_5mav_from_history(hist_df: pd.DataFrame) -> float:
+    """
+    從 yfinance 歷史 DataFrame 取「今天以前」連續 5 個交易日的成交量平均。
+    hist_df 已在 get_history_cached() 中過濾掉今天，直接取最後 5 筆即可。
+    """
+    if hist_df.empty or "Volume" not in hist_df.columns:
+        return 0.0
+    vols = pd.to_numeric(hist_df["Volume"], errors="coerce").dropna()
+    if len(vols) < 5:
+        return float(vols.mean()) if len(vols) > 0 else 0.0
+    return float(vols.iloc[-5:].mean())
+
+
+def fetch_finmind_close_volume(stock_id: str) -> float:
+    """
+    用 FinMind 抓今日最終收盤成交量（盤後資料，14:00 後較準確）。
+    回傳成交量（float），失敗回傳 0.0。
+    """
+    try:
+        dl    = get_finmind_loader()
+        today = today_str()
+        df    = dl.taiwan_stock_daily(
+            stock_id   = stock_id,
+            start_date = today,
+            end_date   = today,
+        )
+        if df is None or df.empty:
+            return 0.0
+        row = df.iloc[-1]
+        for col in ["volume", "Volume", "vol"]:
+            if col in row.index:
+                return float(row[col])
+        return 0.0
+    except Exception:
+        return 0.0
+
+
+def classify_afterhours_implication(pct: float, close_vol: float,
+                                     mav5: float, tg_threshold: float) -> str:
+    """
+    四種盤後意涵判斷：
+    1. 上漲達門檻 + 量增(> 1.1 倍 5MAV) → 量增上漲，可考慮留倉
+    2. 上漲達門檻 + 量縮(< 0.9 倍 5MAV) → 量縮上漲，不宜追高
+    3. 下跌達門檻 + 量增(> 1.1 倍 5MAV) → 趨勢轉弱，建議避開
+    4. 下跌達門檻 + 量縮(< 0.9 倍 5MAV) → 量縮下跌，可尋買點
+    其餘（不足門檻 / 量能中性）回傳空字串。
+    """
+    if mav5 <= 0 or close_vol <= 0:
+        return ""
+    ratio   = close_vol / mav5
+    is_up   = pct >= tg_threshold
+    is_down = pct <= -tg_threshold
+    vol_up  = ratio > 1.1
+    vol_dwn = ratio < 0.9
+
+    if is_up and vol_up:
+        return "📈 盤後意涵：量增上漲，可考慮留倉"
+    elif is_up and vol_dwn:
+        return "⚠️ 盤後意涵：量縮上漲，不宜追高"
+    elif is_down and vol_up:
+        return "💣 盤後意涵：趨勢轉弱，建議避開"
+    elif is_down and vol_dwn:
+        return "🔍 盤後意涵：量縮下跌，可尋買點"
+    return ""
+
+
+def run_afterhours_analysis(bid: str, stock: dict, pct: float,
+                             hist_df: pd.DataFrame,
+                             tg_threshold: float) -> str:
+    """
+    盤後意涵主流程：
+    - 只對當天已觸發門檻的股票執行（由呼叫端判斷）
+    - 計算 5MAV（yfinance 歷史快取，不額外呼叫 API）
+    - 抓今日收盤最終量（FinMind，14:00 後資料較完整）
+    - 判斷四種意涵，只在股票卡顯示，不主動發送 Telegram
+    回傳意涵標籤，無意涵或資料不足時回傳空字串。
+    """
+    stock_id  = stock["id"]
+    mav5      = get_5mav_from_history(hist_df)
+    if mav5 <= 0:
+        return ""
+
+    close_vol = fetch_finmind_close_volume(stock_id)
+    if close_vol <= 0:
+        return ""
+
+    return classify_afterhours_implication(pct, close_vol, mav5, tg_threshold)
+
+
+# ===========================================================================
+# --- 10. 歷史資料快取（yfinance，跨日才重抓）---
 # ===========================================================================
 
 def get_history_cached(stock_id: str) -> pd.DataFrame:
@@ -364,7 +469,7 @@ def get_history_cached(stock_id: str) -> pd.DataFrame:
 
 
 # ===========================================================================
-# --- 9. TaiwanStockQuote 縫合今日棒（取代舊版 FinMind 縫合）---
+# --- 11. TaiwanStockQuote 縫合今日棒（取代舊版 FinMind 縫合）---
 # ===========================================================================
 
 def stitch_with_quote(hist_df: pd.DataFrame, stock_id: str) -> tuple:
@@ -402,7 +507,7 @@ def stitch_with_quote(hist_df: pd.DataFrame, stock_id: str) -> tuple:
 
 
 # ===========================================================================
-# --- 10. KD 金叉判斷 ---
+# --- 12. KD 金叉判斷 ---
 # ===========================================================================
 
 def classify_kd_cross(k_now, d_now, k_prev, d_prev):
@@ -419,7 +524,7 @@ def classify_kd_cross(k_now, d_now, k_prev, d_prev):
 
 
 # ===========================================================================
-# --- 11. 技術指標計算 ---
+# --- 13. 技術指標計算 ---
 # ===========================================================================
 
 def calc_indicators(df: pd.DataFrame):
@@ -457,7 +562,7 @@ def calc_indicators(df: pd.DataFrame):
 
 
 # ===========================================================================
-# --- 12. 主分析函數（歷史快取 + TaiwanStockQuote 縫合）---
+# --- 14. 主分析函數（歷史快取 + TaiwanStockQuote 縫合）---
 # ===========================================================================
 
 @st.cache_data(ttl=60)
@@ -514,11 +619,12 @@ def fetch_and_analyze(stock_id: str):
         "details": details, "score": score,
         "k":       float(last["K"]), "d": float(last["D"]),
         "source":  source,
+        "hist_df": hist_df,   # 供盤後 5MAV 計算使用
     }
 
 
 # ===========================================================================
-# --- 13. 通知邏輯（觸發時順帶抓 FinMind 動能）---
+# --- 15. 通知邏輯（觸發時順帶抓 FinMind 動能）---
 # ===========================================================================
 
 def send_telegram(tg_token: str, tg_chat_id: str, msg: str):
@@ -634,7 +740,7 @@ def check_and_notify(bid: str, stock: dict, pct: float, res: dict,
 
 
 # ===========================================================================
-# --- 14. 介面 ---
+# --- 16. 介面 ---
 # ===========================================================================
 st.set_page_config(page_title="台股決策系統 V7.5", layout="centered")
 st.title("🤖 台股 AI 技術分級決策支援")
@@ -780,6 +886,23 @@ with st.sidebar:
 2. 幅度 ≥ 1（排除噪音假叉）
 3. KD < 20 → 低檔金叉 ✅　20~79 → 標準金叉 ✅　≥ 80 → 高檔鈍化 ❌
         """)
+    with st.expander("📖 盤後意涵說明"):
+        st.markdown("""
+**顯示時機**：收盤後 14:00 起（FinMind 資料此時較完整）
+
+**5 日均量基準（5MAV）**：取今天以前連續 5 個交易日的成交量平均。
+
+**四種判斷**：
+
+| 漲跌 | 量能 | 意涵 |
+|---|---|---|
+| 上漲達門檻 | 收盤量 > 5MAV × 1.1 | 📈 量增上漲，可考慮留倉 |
+| 上漲達門檻 | 收盤量 < 5MAV × 0.9 | ⚠️ 量縮上漲，不宜追高 |
+| 下跌達門檻 | 收盤量 > 5MAV × 1.1 | 💣 趨勢轉弱，建議避開 |
+| 下跌達門檻 | 收盤量 < 5MAV × 0.9 | 🔍 量縮下跌，可尋買點 |
+
+**Telegram**：每日每檔只發一次，不重複通知。
+        """)
 
 # ── 股票清單 ──────────────────────────────────────────────────────────────
 st.divider()
@@ -837,6 +960,27 @@ for idx, stock in enumerate(st.session_state.my_stocks):
                 else:
                     full_label = alert_label
                 st.caption("通知狀態：{}".format(full_label))
+
+                # ── 盤後意涵（14:00 後才顯示，且只對當天已觸發門檻的股票）──
+                if is_after_hours():
+                    # 從 alert_state 確認該股今天是否曾觸發門檻
+                    _ah_astate  = load_alert_state(browser_id)
+                    _ah_states  = _ah_astate.get("states", {})
+                    _ah_alerted = _ah_states.get(stock["id"], {}).get("alerted", False)
+                    _ah_at      = _ah_states.get(stock["id"], {}).get("alerted_at", "")
+                    _triggered  = _ah_alerted or bool(_ah_at)   # 曾觸發（含已重置）
+
+                    if _triggered:
+                        hist_df_for_ah = res.get("hist_df", pd.DataFrame())
+                        ah_impl = run_afterhours_analysis(
+                            bid          = browser_id,
+                            stock        = stock,
+                            pct          = res["pct"],
+                            hist_df      = hist_df_for_ah,
+                            tg_threshold = st.session_state.tg_threshold,
+                        )
+                        if ah_impl:
+                            st.caption(ah_impl)
             with col_metric:
                 st.metric("股價", "{:.2f}".format(res["price"]),
                           "{:+.2f}%".format(res["pct"]), delta_color="inverse")
