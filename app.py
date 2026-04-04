@@ -18,7 +18,7 @@ from ta.volatility import BollingerBands
 tw_tz         = pytz.timezone("Asia/Taipei")
 MARKET_OPEN      = dt_time(9, 0)
 MARKET_CLOSE     = dt_time(13, 30)
-AFTERHOURS_START = dt_time(14, 0)   
+AFTERHOURS_START = dt_time(14, 0)   # 盤後意涵分析起始時間
 TG_SAVE_FILE  = "tg_config.json"
 USER_DATA_DIR = "user_data"
 ALERT_DIR     = "alert_state"
@@ -45,7 +45,7 @@ def today_str() -> str:
     return now_tw().strftime("%Y-%m-%d")
 
 # ===========================================================================
-# --- 1. 使用者識別與資料管理 ---
+# --- 1. 資料存取與使用者管理 ---
 # ===========================================================================
 def get_browser_id_component():
     components.html(f"""
@@ -106,238 +106,216 @@ def save_alert_state(bid: str, state: dict):
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 # ===========================================================================
-# --- 2. 配置與 API 工具 ---
+# --- 2. 指標計算與 API 工具 (修正 TypeError) ---
 # ===========================================================================
-def load_tg_config() -> dict:
-    if os.path.exists(TG_SAVE_FILE):
-        try:
-            with open(TG_SAVE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except: pass
-    return {"tg_token":"", "tg_chat_id":"", "tg_threshold":3.0, "tg_reset":1.0, "finmind_token":""}
-
-def save_tg_config():
-    with open(TG_SAVE_FILE, "w", encoding="utf-8") as f:
-        json.dump({
-            "tg_token": st.session_state.tg_token,
-            "tg_chat_id": st.session_state.tg_chat_id,
-            "tg_threshold": st.session_state.tg_threshold,
-            "tg_reset": st.session_state.tg_reset,
-            "finmind_token": st.session_state.finmind_token,
-        }, f, ensure_ascii=False, indent=4)
-
-def get_finmind_loader():
-    dl = DataLoader()
-    if st.session_state.get("finmind_token"):
-        dl.login_by_token(api_token=st.session_state.finmind_token)
-    return dl
-
-# ===========================================================================
-# --- 3. 報價與技術指標 ---
-# ===========================================================================
-@st.cache_data(ttl=60)
-def fetch_all_quotes() -> dict:
-    try:
-        dl = get_finmind_loader()
-        df = dl.taiwan_stock_quote(stock_id="")
-        if df is None or df.empty: return {}
-        result = {}
-        for _, row in df.iterrows():
-            sid = str(row.get("stock_id", ""))
-            if sid:
-                price = float(row.get("close", row.get("price", 0)))
-                result[sid] = {"price": price, "pct": float(row.get("change_rate", 0)), "open": float(row.get("open", 0))}
-        return result
-    except: return {}
-
-def get_history_cached(stock_id: str) -> pd.DataFrame:
-    cache = st.session_state.hist_cache
-    today = today_str()
-    if stock_id in cache and cache[stock_id]["cached_date"] == today:
-        return cache[stock_id]["df"].copy()
-    df = pd.DataFrame()
-    for suffix in [".TW", ".TWO"]:
-        try:
-            temp = yf.download(stock_id + suffix, period="6mo", progress=False)
-            if not temp.empty:
-                df = temp
-                break
-        except: continue
-    if df.empty: return pd.DataFrame()
-    if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-    df = df.astype(float).ffill()
-    df.index = pd.to_datetime(df.index).normalize()
-    yesterday = pd.Timestamp(today) - timedelta(days=1)
-    df = df[df.index <= yesterday]
-    cache[stock_id] = {"df": df, "cached_date": today}
-    return df.copy()
-
 def calc_indicators(df: pd.DataFrame):
-    if len(df) < 30: return None
+    if df is None or len(df) < 30: return None
+    df = df.copy()
+    # 確保資料為 1D Series 避免維度錯誤
     close = pd.Series(df["Close"].values.flatten(), index=df.index).astype(float)
     high = pd.Series(df["High"].values.flatten(), index=df.index).astype(float)
     low = pd.Series(df["Low"].values.flatten(), index=df.index).astype(float)
-    df = df.copy()
-    df["MA5"] = SMAIndicator(close, window=5).sma_indicator()
-    df["MA10"] = SMAIndicator(close, window=10).sma_indicator()
-    df["MA20"] = SMAIndicator(close, window=20).sma_indicator()
-    stoch = StochasticOscillator(high, low, close, window=9)
-    df["K"], df["D"] = stoch.stoch(), stoch.stoch_signal()
-    df["MACD_diff"] = MACD(close).macd_diff()
-    df["RSI"] = RSIIndicator(close).rsi()
-    df["BBM"] = BollingerBands(close).bollinger_mavg()
+
+    try:
+        # 新版 ta (window)
+        df["MA5"] = SMAIndicator(close, window=5).sma_indicator()
+        df["MA10"] = SMAIndicator(close, window=10).sma_indicator()
+        df["MA20"] = SMAIndicator(close, window=20).sma_indicator()
+        stoch = StochasticOscillator(high, low, close, window=9)
+        df["K"], df["D"] = stoch.stoch(), stoch.stoch_signal()
+        df["MACD_diff"] = MACD(close, window_slow=26, window_fast=12, window_sign=9).macd_diff()
+        df["RSI"] = RSIIndicator(close, window=14).rsi()
+        df["BBM"] = BollingerBands(close, window=20).bollinger_mavg()
+    except TypeError:
+        # 舊版 ta (n)
+        df["MA5"] = SMAIndicator(close, n=5).sma_indicator()
+        df["MA10"] = SMAIndicator(close, n=10).sma_indicator()
+        df["MA20"] = SMAIndicator(close, n=20).sma_indicator()
+        stoch = StochasticOscillator(high, low, close, n=9)
+        df["K"], df["D"] = stoch.stoch(), stoch.stoch_signal()
+        df["MACD_diff"] = MACD(close, n_slow=26, n_fast=12, n_sign=9).macd_diff()
+        df["RSI"] = RSIIndicator(close, n=14).rsi()
+        df["BBM"] = BollingerBands(close, n=20).bollinger_mavg()
+    return df
+
+@st.cache_data(ttl=60)
+def fetch_all_quotes() -> dict:
+    try:
+        dl = DataLoader()
+        if st.session_state.get("finmind_token"):
+            dl.login_by_token(api_token=st.session_state.finmind_token)
+        df = dl.taiwan_stock_quote(stock_id="")
+        if df is None or df.empty: return {}
+        return {str(row["stock_id"]): {"price": float(row.get("close", 0)), "pct": float(row.get("change_rate", 0))} for _, row in df.iterrows()}
+    except: return {}
+
+def get_history_cached(stock_id: str):
+    cache = st.session_state.hist_cache
+    today = today_str()
+    if stock_id in cache and cache[stock_id]["date"] == today:
+        return cache[stock_id]["df"]
+    df = pd.DataFrame()
+    for s in [".TW", ".TWO"]:
+        try:
+            tmp = yf.download(stock_id+s, period="6mo", progress=False)
+            if not tmp.empty: df = tmp; break
+        except: continue
+    if not df.empty:
+        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+        df = df.astype(float).ffill()
+        cache[stock_id] = {"df": df, "date": today}
     return df
 
 # ===========================================================================
-# --- 4. 核心分析邏輯 ---
-# ===========================================================================
-def fetch_momentum_analysis(stock_id: str, pct: float, tg_threshold: float) -> dict:
-    try:
-        dl = get_finmind_loader()
-        today = today_str()
-        df = dl.taiwan_stock_minute(stock_id=stock_id, start_date=today, end_date=today)
-        if df is None or df.empty: return {}
-        df['volume'] = pd.to_numeric(df['volume'], errors='coerce').fillna(0)
-        recent = df.tail(6)
-        if len(recent) < 2: return {}
-        cur_v, avg_v = float(recent.iloc[-1]['volume']), float(recent.iloc[:-1]['volume'].mean())
-        ratio = cur_v / avg_v if avg_v > 0 else 0.0
-        
-        label = "➡️ 正常"
-        if ratio >= 2.0: label = "🔥 爆量"
-        elif ratio >= 1.5: label = "📈 放量"
-        elif ratio < 1.0: label = "📉 縮量"
-
-        short_impl = ""
-        if pct >= tg_threshold and ratio >= 1.5: short_impl = "🚀 短線意涵：帶量突破"
-        elif pct >= tg_threshold and ratio < 1.0: short_impl = "⚠️ 短線意涵：虛假拉抬"
-        elif pct <= -tg_threshold and ratio >= 1.5: short_impl = "💣 短線意涵：帶量殺盤"
-        elif pct <= -tg_threshold and ratio < 1.0: short_impl = "🔍 短線意涵：洗盤觀察"
-
-        return {"cur_vol": int(cur_v), "avg_vol": int(avg_v), "ratio": round(ratio, 2), "momentum_label": label, "short_impl": short_impl}
-    except: return {}
-
-def run_afterhours_analysis(bid: str, stock: dict, pct: float, hist_df: pd.DataFrame, tg_threshold: float):
-    # 1. 取得 5MAV (歷史)
-    if hist_df.empty: return ""
-    mav5 = float(hist_df["Volume"].iloc[-5:].mean()) if len(hist_df) >= 5 else 0
-    if mav5 <= 0: return ""
-
-    # 2. 取得今日收盤總量
-    try:
-        dl = get_finmind_loader()
-        today = today_str()
-        df = dl.taiwan_stock_daily(stock_id=stock["id"], start_date=today, end_date=today)
-        if df is None or df.empty: return ""
-        close_vol = float(df.iloc[-1]["volume"])
-    except: return ""
-
-    # 3. 判斷意涵
-    ratio = close_vol / mav5
-    impl = ""
-    if pct >= tg_threshold and ratio > 1.1: impl = "📈 盤後意涵：量增上漲，可考慮留倉"
-    elif pct >= tg_threshold and ratio < 0.9: impl = "⚠️ 盤後意涵：量縮上漲，不宜追高"
-    elif pct <= -tg_threshold and ratio > 1.1: impl = "💣 盤後意涵：趨勢轉弱，建議避開"
-    elif pct <= -tg_threshold and ratio < 0.9: impl = "🔍 盤後意涵：量縮下跌，可尋買點"
-    
-    # 4. 存入狀態並發送 Telegram
-    if impl:
-        alert_state = load_alert_state(bid)
-        s = alert_state["states"].setdefault(stock["id"], {})
-        if not s.get("ah_sent"):
-            send_telegram(st.session_state.tg_token, st.session_state.tg_chat_id, f"📊 <b>盤後意涵分析</b>\n標的：{stock['name']}\n{impl}")
-            s["ah_sent"] = True
-            s["ah_label"] = impl
-            save_alert_state(bid, alert_state)
-    return impl
-
-# ===========================================================================
-# --- 5. 通知與發送 ---
+# --- 3. 核心監控與分析邏輯 ---
 # ===========================================================================
 def send_telegram(token, chat_id, msg):
     if not token or not chat_id: return
-    try: requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json={"chat_id":chat_id, "text":msg, "parse_mode":"HTML"}, timeout=5)
+    try: requests.post(f"https://api.telegram.org/bot{token}/sendMessage", 
+                       json={"chat_id":chat_id, "text":msg, "parse_mode":"HTML"}, timeout=5)
     except: pass
 
-def check_and_notify(bid, stock, pct, res, tg_token, tg_chat_id, tg_threshold, tg_reset):
-    alert_state = load_alert_state(bid)
-    s = alert_state["states"].setdefault(stock["id"], {"alerted": False, "momentum": {}})
+def get_momentum_analysis(stock_id, pct, threshold):
+    try:
+        dl = DataLoader()
+        if st.session_state.get("finmind_token"): dl.login_by_token(api_token=st.session_state.finmind_token)
+        df = dl.taiwan_stock_minute(stock_id=stock_id, start_date=today_str())
+        if df is None or len(df) < 2: return ""
+        df['volume'] = pd.to_numeric(df['volume'], errors='coerce')
+        cur_v = df.iloc[-1]['volume']
+        avg_v = df.iloc[-6:-1]['volume'].mean() if len(df) >= 6 else df['volume'].mean()
+        ratio = cur_v / avg_v if avg_v > 0 else 0
+        
+        if pct >= threshold:
+            return "🚀 帶量突破" if ratio >= 1.5 else "⚠️ 虛假拉抬 (量縮)"
+        if pct <= -threshold:
+            return "💣 帶量殺盤" if ratio >= 1.5 else "🔍 洗盤觀察 (量縮)"
+        return ""
+    except: return ""
+
+def run_afterhours_analysis(bid, stock, pct, hist_df, threshold):
+    if hist_df.empty or not is_after_hours(): return ""
     
-    abs_pct = abs(pct)
-    if s["alerted"]:
-        if abs_pct <= tg_reset:
-            s["alerted"] = False
+    # 檢查是否已存有今日盤後意涵
+    alert_state = load_alert_state(bid)
+    stock_state = alert_state["states"].get(stock["id"], {})
+    if stock_state.get("ah_impl"): return stock_state["ah_impl"]
+
+    try:
+        mav5 = float(hist_df["Volume"].iloc[-5:].mean())
+        dl = DataLoader()
+        if st.session_state.get("finmind_token"): dl.login_by_token(api_token=st.session_state.finmind_token)
+        df_today = dl.taiwan_stock_daily(stock_id=stock["id"], start_date=today_str())
+        if df_today is None or df_today.empty: return ""
+        
+        today_vol = float(df_today.iloc[-1]["volume"])
+        ratio = today_vol / mav5
+        impl = ""
+        if pct >= threshold:
+            impl = "📈 盤後意涵：量增上漲，可考慮留倉" if ratio > 1.1 else "⚠️ 盤後意涵：量縮上漲，不宜追高"
+        elif pct <= -threshold:
+            impl = "💣 盤後意涵：趨勢轉弱，建議避開" if ratio > 1.1 else "🔍 盤後意涵：量縮下跌，可尋買點"
+        
+        if impl:
+            # 存入狀態並發送通知
+            stock_state["ah_impl"] = impl
+            alert_state["states"][stock["id"]] = stock_state
             save_alert_state(bid, alert_state)
-            return "🔓 已重置"
-        return f"🔒 鎖定中 ({s.get('alerted_at')})"
-    else:
-        if abs_pct >= tg_threshold:
-            mom = fetch_momentum_analysis(stock["id"], pct, tg_threshold)
-            s.update({"alerted": True, "alerted_at": now_tw().strftime("%H:%M"), "momentum": mom, "ever_triggered": True})
-            msg = f"🔔 <b>價格異動</b>\n標的：{stock['name']}\n價格：{res['price']}\n漲跌：{pct:+.2f}%\n{mom.get('short_impl','')}"
-            send_telegram(tg_token, tg_chat_id, msg)
-            save_alert_state(bid, alert_state)
-            return f"✅ 已通知 ({s['alerted_at']})"
-    return f"⚪ 監控中 ({pct:+.2f}%)"
+            send_telegram(st.session_state.tg_token, st.session_state.tg_chat_id, 
+                          f"📊 <b>盤後意涵分析</b>\n標的：{stock['name']}\n{impl}")
+        return impl
+    except: return ""
 
 # ===========================================================================
-# --- 6. 介面初始化 ---
+# --- 4. 主程式介面 ---
 # ===========================================================================
-st.set_page_config(page_title="台股決策系統 V7.6", layout="centered")
+st.set_page_config(page_title="台股決策系統", layout="wide")
+
 if "initialized" not in st.session_state:
     cfg = load_tg_config()
-    st.session_state.update({**cfg, "initialized":True, "hist_cache":{}, "my_stocks":[]})
+    st.session_state.update({**cfg, "initialized": True, "hist_cache": {}})
 
+# 獲取瀏覽器 ID
 browser_id = st.query_params.get("bid", "")
 if not browser_id:
     get_browser_id_component()
     st.stop()
-st.session_state.my_stocks = load_user_stocks(browser_id)
 
-# ===========================================================================
-# --- 7. 股票清單顯示 ---
-# ===========================================================================
-st.title("🤖 台股 AI 技術分級決策支援")
+my_stocks = load_user_stocks(browser_id)
 
-# 側邊欄設定 (略，保持原有 UI)
 with st.sidebar:
-    st.header("⚙️ 設定")
+    st.title("⚙️ 控制面板")
     st.session_state.finmind_token = st.text_input("FinMind Token", value=st.session_state.finmind_token, type="password")
     st.session_state.tg_token = st.text_input("TG Bot Token", value=st.session_state.tg_token, type="password")
     st.session_state.tg_chat_id = st.text_input("TG Chat ID", value=st.session_state.tg_chat_id)
-    st.session_state.tg_threshold = st.number_input("觸發門檻", value=float(st.session_state.tg_threshold))
-    st.session_state.tg_reset = st.number_input("重置門檻", value=float(st.session_state.tg_reset))
-    if st.button("💾 儲存設定"): save_tg_config(); st.success("儲存成功")
-
-# 股票卡片
-for idx, stock in enumerate(st.session_state.my_stocks):
-    hist = get_history_cached(stock["id"])
-    quotes = fetch_all_quotes()
-    q = quotes.get(stock["id"], {"price":0, "pct":0})
+    st.session_state.tg_threshold = st.number_input("觸發門檻 (%)", value=float(st.session_state.tg_threshold), step=0.1)
+    st.session_state.tg_reset = st.number_input("重置門檻 (%)", value=float(st.session_state.tg_reset), step=0.1)
+    if st.button("💾 儲存設定"):
+        save_tg_config()
+        st.success("設定已儲存")
     
-    # 計算技術指標 (縫合數據)
-    df = calc_indicators(hist) # 此處簡化，實際應用可加入縫合邏輯
+    new_id = st.text_input("➕ 新增股票代號 (如: 2330)")
+    new_name = st.text_input("股票名稱")
+    if st.button("確認新增") and new_id and new_name:
+        my_stocks.append({"id": new_id, "name": new_name})
+        save_user_stocks(browser_id, my_stocks)
+        st.rerun()
+
+st.title("📈 我的監控清單")
+quotes = fetch_all_quotes()
+
+for idx, stock in enumerate(my_stocks):
+    q = quotes.get(stock["id"])
+    hist = get_history_cached(stock["id"])
     
     with st.container(border=True):
-        res = {"price": q["price"], "pct": q["pct"]}
-        st.subheader(f"{stock['name']} ({stock['id']})")
-        
-        # 盤中通知
-        label = check_and_notify(browser_id, stock, q["pct"], res, st.session_state.tg_token, st.session_state.tg_chat_id, st.session_state.tg_threshold, st.session_state.tg_reset)
-        st.caption(f"通知狀態：{label}")
+        col1, col2, col3 = st.columns([2, 1, 1])
+        with col1:
+            st.subheader(f"{stock['name']} ({stock['id']})")
+            if q:
+                pct = q["pct"]
+                price = q["price"]
+                # 盤中監控邏輯
+                alert_state = load_alert_state(browser_id)
+                s = alert_state["states"].get(stock["id"], {"alerted": False})
+                
+                # 檢查是否觸發
+                if not s.get("alerted") and abs(pct) >= st.session_state.tg_threshold:
+                    mom_label = get_momentum_analysis(stock["id"], pct, st.session_state.tg_threshold)
+                    msg = f"🔔 <b>價格觸發</b>\n標的：{stock['name']}\n價格：{price}\n漲跌：{pct:+.2f}%\n{mom_label}"
+                    send_telegram(st.session_state.tg_token, st.session_state.tg_chat_id, msg)
+                    s.update({"alerted": True, "time": now_tw().strftime("%H:%M")})
+                    alert_state["states"][stock["id"]] = s
+                    save_alert_state(browser_id, alert_state)
+                
+                # 檢查重置
+                elif s.get("alerted") and abs(pct) <= st.session_state.tg_reset:
+                    s["alerted"] = False
+                    alert_state["states"][stock["id"]] = s
+                    save_alert_state(browser_id, alert_state)
 
-        # 盤後意涵 (修正重點)
-        if is_after_hours():
-            # 只要漲跌幅達標，不論是否曾觸發通知都檢查
-            if abs(q["pct"]) >= st.session_state.tg_threshold:
-                ah_label = run_afterhours_analysis(browser_id, stock, q["pct"], hist, st.session_state.tg_threshold)
-                if ah_label: st.info(ah_label)
-        
-        if st.button("🗑️ 刪除", key=f"del_{stock['id']}"):
-            st.session_state.my_stocks.pop(idx)
-            save_user_stocks(browser_id, st.session_state.my_stocks)
-            st.rerun()
+                st.write(f"當前價格: **{price}** ({pct:+.2f}%)")
+                
+                # 盤後意涵顯示區
+                if is_after_hours() and abs(pct) >= st.session_state.tg_threshold:
+                    ah_label = run_afterhours_analysis(browser_id, stock, pct, hist, st.session_state.tg_threshold)
+                    if ah_label: st.info(ah_label)
+            else:
+                st.error("暫無即時報價")
 
-# 自動重新整理腳本
+        with col2:
+            # 顯示技術指標摘要
+            df_idx = calc_indicators(hist)
+            if df_idx is not None:
+                last = df_idx.iloc[-1]
+                st.caption(f"RSI: {last['RSI']:.1f} | K: {last['K']:.1f}")
+
+        with col3:
+            if st.button("🗑️ 刪除", key=f"del_{stock['id']}"):
+                my_stocks.pop(idx)
+                save_user_stocks(browser_id, my_stocks)
+                st.rerun()
+
+# 交易時段自動刷新 (1分鐘)
 if is_market_open():
     components.html("<script>setTimeout(function(){window.parent.location.reload();}, 60000);</script>", height=0)
