@@ -41,11 +41,31 @@ def is_market_open() -> bool:
 
 
 def is_after_hours() -> bool:
-    """收盤後且 >= 14:00 才顯示盤後意涵（FinMind 資料此時較完整）"""
-    n = now_tw()
-    if n.weekday() >= 5:
-        return False
-    return n.time() >= AFTERHOURS_START and n.time() > MARKET_CLOSE
+    """
+    判斷是否應顯示盤後意涵，涵蓋三個時段：
+    1. 當天 14:00 ~ 23:59（收盤後當日）
+    2. 隔天 00:00 ~ 08:59（次日開盤前）
+    3. 週六、週日全天（上週五收盤後）
+    排除：週一 09:00 後（新的一個交易日開始）
+    """
+    n    = now_tw()
+    t    = n.time()
+    wday = n.weekday()  # 0=週一 ... 6=週日
+
+    # 週六、週日全天顯示（上週五盤後）
+    if wday >= 5:
+        return True
+
+    # 平日 14:00 ~ 23:59（當天盤後）
+    if t >= AFTERHOURS_START:
+        return True
+
+    # 平日 00:00 ~ 08:59（次日開盤前，仍顯示前一日盤後）
+    if t < MARKET_OPEN:
+        return True
+
+    # 其餘（09:00 ~ 13:59）= 開盤中或收盤前，不顯示
+    return False
 
 
 def today_str() -> str:
