@@ -723,8 +723,9 @@ def check_and_notify(bid: str, stock: dict, pct: float, res: dict,
                      grade, action, inds, thresh, reset, mom_line)
 
             send_telegram(tg_token, tg_chat_id, msg)
-            s["alerted"]    = True
-            s["alerted_at"] = now_tw().strftime("%H:%M")
+            s["alerted"]        = True
+            s["alerted_at"]     = now_tw().strftime("%H:%M")
+            s["ever_triggered"] = True   # 今日曾觸發，盤後分析用，重置後仍保留
             label = "✅ 已發送通知（{}，漲跌 {:+.2f}%）".format(s["alerted_at"], pct)
             if momentum and "momentum_label" in momentum:
                 label += "　" + momentum["momentum_label"]
@@ -961,16 +962,17 @@ for idx, stock in enumerate(st.session_state.my_stocks):
                     full_label = alert_label
                 st.caption("通知狀態：{}".format(full_label))
 
-                # ── 盤後意涵（14:00 後才顯示，且只對當天已觸發門檻的股票）──
+                # ── 盤後意涵（14:00 後才顯示）──
                 if is_after_hours():
-                    # 從 alert_state 確認該股今天是否曾觸發門檻
-                    _ah_astate  = load_alert_state(browser_id)
-                    _ah_states  = _ah_astate.get("states", {})
-                    _ah_alerted = _ah_states.get(stock["id"], {}).get("alerted", False)
-                    _ah_at      = _ah_states.get(stock["id"], {}).get("alerted_at", "")
-                    _triggered  = _ah_alerted or bool(_ah_at)   # 曾觸發（含已重置）
+                    # 判斷該股今天是否曾觸發門檻（ever_triggered 重置後仍保留）
+                    _ah_astate   = load_alert_state(browser_id)
+                    _ah_s        = _ah_astate.get("states", {}).get(stock["id"], {})
+                    _ever        = _ah_s.get("ever_triggered", False)
+                    # session 內手動強制顯示旗標（測試用）
+                    _force_key   = "ah_force_" + stock["id"]
+                    _force       = st.session_state.get(_force_key, False)
 
-                    if _triggered:
+                    if _ever or _force:
                         hist_df_for_ah = res.get("hist_df", pd.DataFrame())
                         ah_impl = run_afterhours_analysis(
                             bid          = browser_id,
@@ -981,6 +983,13 @@ for idx, stock in enumerate(st.session_state.my_stocks):
                         )
                         if ah_impl:
                             st.caption(ah_impl)
+                        else:
+                            st.caption("📊 盤後意涵：資料取得中，請稍後重新整理")
+                    else:
+                        # 提供手動觸發按鈕（方便測試或門檻剛調整的情況）
+                        if st.button("🔍 手動查詢盤後意涵", key="ah_btn_" + stock["id"]):
+                            st.session_state[_force_key] = True
+                            st.rerun()
             with col_metric:
                 st.metric("股價", "{:.2f}".format(res["price"]),
                           "{:+.2f}%".format(res["pct"]), delta_color="inverse")
