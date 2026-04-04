@@ -384,7 +384,8 @@ def get_5mav_from_history(hist_df: pd.DataFrame) -> float:
 def fetch_finmind_close_volume(stock_id: str) -> tuple:
     """
     用 FinMind 抓最近一個交易日的收盤成交量。
-    抓近 7 天資料取最後一筆（確保拿到最新交易日，不受 FinMind 日K更新時間影響）。
+    FinMind taiwan_stock_daily 的成交量欄位名稱為 Trading_Volume（大寫）。
+    抓近 7 天取最後一筆，確保拿到最新交易日。
     回傳 (volume: float, date: str)，失敗回傳 (0.0, "")。
     """
     try:
@@ -398,17 +399,24 @@ def fetch_finmind_close_volume(stock_id: str) -> tuple:
         )
         if df is None or df.empty:
             return 0.0, ""
+
         # 排序取最後一筆（最新交易日）
         date_col = "date" if "date" in df.columns else df.columns[0]
-        df = df.sort_values(date_col)
-        row      = df.iloc[-1]
+        df        = df.sort_values(date_col)
+        row       = df.iloc[-1]
         data_date = str(row.get(date_col, ""))
-        for col in ["volume", "Volume", "vol"]:
-            if col in row.index:
-                return float(row[col]), data_date
-        return 0.0, ""
-    except Exception:
-        return 0.0, ""
+
+        # FinMind taiwan_stock_daily 成交量欄位名稱（依優先順序嘗試）
+        for col in ["Trading_Volume", "volume", "Volume", "vol", "trading_volume"]:
+            if col in row.index and row[col] not in [None, "", "nan"]:
+                val = float(row[col])
+                if val > 0:
+                    return val, data_date
+
+        # 除錯：印出實際欄位名稱供檢查
+        return 0.0, "欄位: " + str(list(row.index))
+    except Exception as e:
+        return 0.0, "錯誤: " + str(e)
 
 
 def classify_afterhours_implication(pct: float, close_vol: float,
