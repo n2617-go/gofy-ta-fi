@@ -381,28 +381,34 @@ def get_5mav_from_history(hist_df: pd.DataFrame) -> float:
     return float(vols.iloc[-5:].mean())
 
 
-def fetch_finmind_close_volume(stock_id: str) -> float:
+def fetch_finmind_close_volume(stock_id: str) -> tuple:
     """
-    用 FinMind 抓今日最終收盤成交量（盤後資料，14:00 後較準確）。
-    回傳成交量（float），失敗回傳 0.0。
+    用 FinMind 抓最近一個交易日的收盤成交量。
+    抓近 7 天資料取最後一筆（確保拿到最新交易日，不受 FinMind 日K更新時間影響）。
+    回傳 (volume: float, date: str)，失敗回傳 (0.0, "")。
     """
     try:
-        dl    = get_finmind_loader()
-        today = today_str()
-        df    = dl.taiwan_stock_daily(
+        dl         = get_finmind_loader()
+        today      = today_str()
+        start_date = (now_tw() - timedelta(days=7)).strftime("%Y-%m-%d")
+        df         = dl.taiwan_stock_daily(
             stock_id   = stock_id,
-            start_date = today,
+            start_date = start_date,
             end_date   = today,
         )
         if df is None or df.empty:
-            return 0.0
-        row = df.iloc[-1]
+            return 0.0, ""
+        # 排序取最後一筆（最新交易日）
+        date_col = "date" if "date" in df.columns else df.columns[0]
+        df = df.sort_values(date_col)
+        row      = df.iloc[-1]
+        data_date = str(row.get(date_col, ""))
         for col in ["volume", "Volume", "vol"]:
             if col in row.index:
-                return float(row[col])
-        return 0.0
+                return float(row[col]), data_date
+        return 0.0, ""
     except Exception:
-        return 0.0
+        return 0.0, ""
 
 
 def classify_afterhours_implication(pct: float, close_vol: float,
@@ -458,18 +464,19 @@ def run_afterhours_analysis(bid: str, stock: dict, pct: float,
     if mav5 <= 0:
         return ""
 
-    close_vol = fetch_finmind_close_volume(stock_id)
+    close_vol, data_date = fetch_finmind_close_volume(stock_id)
     if close_vol <= 0:
         return ""
 
     impl = classify_afterhours_implication(pct, close_vol, mav5, tg_threshold)
 
     # ── 存入快取（不管有沒有意涵都存，避免重複呼叫 FinMind）──
-    s["ah_impl"]  = impl
-    s["ah_date"]  = today_str()
-    s["ah_vol"]   = int(close_vol)
-    s["ah_mav5"]  = int(mav5)
-    s["ah_ratio"] = round(close_vol / mav5, 2) if mav5 > 0 else 0
+    s["ah_impl"]      = impl
+    s["ah_date"]      = today_str()
+    s["ah_data_date"] = data_date   # FinMind 資料的實際交易日期（除錯用）
+    s["ah_vol"]       = int(close_vol)
+    s["ah_mav5"]      = int(mav5)
+    s["ah_ratio"]     = round(close_vol / mav5, 2) if mav5 > 0 else 0
     save_alert_state(bid, alert_state)
 
     return impl
@@ -1021,8 +1028,9 @@ for idx, stock in enumerate(st.session_state.my_stocks):
                         _dbg_mav5 = get_5mav_from_history(_dbg_df)
                         st.write("5MAV（5日均量）：", int(_dbg_mav5), "張")
 
-                        _dbg_vol = fetch_finmind_close_volume(stock["id"])
+                        _dbg_vol, _dbg_data_date = fetch_finmind_close_volume(stock["id"])
                         st.write("FinMind 收盤量：", int(_dbg_vol), "張")
+                        st.write("FinMind 資料日期：", _dbg_data_date)
 
                         if _dbg_mav5 > 0 and _dbg_vol > 0:
                             _dbg_ratio = _dbg_vol / _dbg_mav5
