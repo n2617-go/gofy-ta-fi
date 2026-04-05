@@ -811,6 +811,93 @@ def check_and_notify(bid: str, stock: dict, pct: float, res: dict,
 # --- 16. 介面 ---
 # ===========================================================================
 st.set_page_config(page_title="台股決策系統 V7.5", layout="centered")
+
+# ── 全域 CSS：縮減間距、美化卡片 ──
+st.markdown("""
+<style>
+/* 全域縮減 Streamlit 預設間距 */
+.block-container { padding-top: 1rem !important; padding-bottom: 1rem !important; }
+[data-testid="stVerticalBlock"] > div { gap: 0.3rem !important; }
+
+/* 股票卡片 */
+.stock-card {
+    background: var(--background-color, #1e1e2e);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 12px;
+    padding: 12px 14px;
+    margin-bottom: 8px;
+}
+
+/* 股票標題列 */
+.card-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: 6px;
+}
+.card-title {
+    font-size: 1.05rem;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+}
+.card-price-block {
+    text-align: right;
+    line-height: 1.2;
+}
+.card-price {
+    font-size: 1.3rem;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+}
+.card-pct-up   { color: #ff6b6b; font-size: 0.8rem; font-weight: 600; }
+.card-pct-down { color: #51cf66; font-size: 0.8rem; font-weight: 600; }
+.card-pct-flat { color: #868e96; font-size: 0.8rem; font-weight: 600; }
+
+/* 資訊列 */
+.card-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
+    font-size: 0.78rem;
+    color: rgba(255,255,255,0.75);
+}
+.card-label { color: rgba(255,255,255,0.45); font-size: 0.72rem; margin-right: 2px; }
+
+/* Badge 標籤 */
+.badge {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 20px;
+    font-size: 0.70rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+}
+.badge-grade  { background: rgba(99,179,237,0.18);  color: #63b3ed; }
+.badge-ind    { background: rgba(72,187,120,0.15);  color: #48bb78; font-size: 0.68rem; }
+.badge-ah     { background: rgba(246,173,85,0.18);  color: #f6ad55; }
+.badge-alert  { background: rgba(160,174,192,0.12); color: #a0aec0; }
+.badge-src    { background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.35);
+                font-size: 0.65rem; }
+
+/* 決策文字顏色 */
+.action-red    { color: #fc8181; font-weight: 700; }
+.action-orange { color: #f6ad55; font-weight: 700; }
+.action-green  { color: #68d391; font-weight: 700; }
+.action-blue   { color: #63b3ed; font-weight: 700; }
+.action-gray   { color: #a0aec0; font-weight: 700; }
+.action-black  { color: #718096; font-weight: 700; }
+
+/* 刪除按鈕縮小 */
+button[kind="secondary"] { padding: 2px 8px !important; font-size: 0.75rem !important; }
+
+/* 隱藏 metric 預設大字 */
+[data-testid="stMetric"] { display: none !important; }
+</style>
+""", unsafe_allow_html=True)
+
 st.title("🤖 台股 AI 技術分級決策支援")
 
 # ── browser_id 初始化 ─────────────────────────────────────────────────────
@@ -1009,99 +1096,117 @@ for idx, stock in enumerate(st.session_state.my_stocks):
         else:
             alert_label = "⚪ 請先設定 Telegram Token 與 Chat ID"
 
-        with st.container(border=True):
-            col_info, col_metric, col_del = st.columns([3, 2, 0.6])
-            with col_info:
-                name = stock["name"]
-                sid  = stock["id"]
-                st.write("### {} ({})".format(name, sid))
-                st.caption("資料來源：{}".format(res["source"]))
-                st.markdown("評級：`{}`".format(res["grade"]))
-                color  = res["color"]
-                action = res["action"]
-                st.markdown(
-                    "**建議決策：<span style='color:{}'>{}</span>**".format(color, action),
-                    unsafe_allow_html=True,
-                )
-                indicators = "　".join(res["details"]) if res["details"] else "無"
-                st.markdown("符合指標：{}".format(indicators))
-                st.caption("KD 值：K={:.1f} / D={:.1f}".format(res["k"], res["d"]))
-                # 從 alert_state 取出短線意涵，直接接在通知狀態後面
-                _astate  = load_alert_state(browser_id)
-                _astates = _astate.get("states", {})
-                _smom    = _astates.get(stock["id"], {}).get("momentum", {})
-                _simpl   = _smom.get("short_impl", "") if _smom else ""
-                if _simpl and is_market_open():
-                    full_label = "{}　{}".format(alert_label, _simpl)
+        # ── 整理卡片所需資料 ──
+        name   = stock["name"]
+        sid    = stock["id"]
+        price  = res["price"]
+        pct    = res["pct"]
+        grade  = res["grade"]
+        action = res["action"]
+        color  = res["color"]
+        source = res["source"]
+        kval   = res["k"]
+        dval   = res["d"]
+
+        # 漲跌幅樣式
+        if pct > 0:
+            pct_cls  = "card-pct-up"
+            pct_sign = "▲"
+        elif pct < 0:
+            pct_cls  = "card-pct-down"
+            pct_sign = "▼"
+        else:
+            pct_cls  = "card-pct-flat"
+            pct_sign = "─"
+
+        # 決策文字顏色 class
+        action_cls = "action-" + color
+
+        # 符合指標 badges
+        ind_badges = "".join(
+            '<span class="badge badge-ind">{}</span>'.format(d)
+            for d in res["details"]
+        ) if res["details"] else '<span style="color:rgba(255,255,255,0.3);font-size:0.72rem;">無</span>'
+
+        # 短線意涵
+        _astate  = load_alert_state(browser_id)
+        _astates = _astate.get("states", {})
+        _smom    = _astates.get(sid, {}).get("momentum", {})
+        _simpl   = _smom.get("short_impl", "") if _smom else ""
+        if _simpl and is_market_open():
+            full_label = "{}　{}".format(alert_label, _simpl)
+        else:
+            full_label = alert_label
+
+        # 盤後意涵
+        ah_impl = ""
+        if is_after_hours():
+            hist_df_for_ah = res.get("hist_df", pd.DataFrame())
+            ah_impl = run_afterhours_analysis(
+                bid          = browser_id,
+                stock        = stock,
+                pct          = pct,
+                hist_df      = hist_df_for_ah,
+                tg_threshold = st.session_state.tg_threshold,
+            )
+            if not ah_impl:
+                _ah_s  = _astates.get(sid, {})
+                _vol   = _ah_s.get("ah_vol", 0)
+                _mav5  = _ah_s.get("ah_mav5", 0)
+                _ratio = _ah_s.get("ah_ratio", 0)
+                if _vol > 0 and _mav5 > 0:
+                    ah_impl = "📊 盤後量能：{:,}張 / 均{:,}張 / {:.2f}倍".format(
+                        round(_vol / 1000), round(_mav5 / 1000), _ratio)
                 else:
-                    full_label = alert_label
-                st.caption("通知狀態：{}".format(full_label))
+                    ah_impl = "📊 FinMind 資料更新中，請稍後重新整理"
 
-                # ── 盤後意涵（14:00 後對所有自選股顯示）──
-                # 除錯資訊（確認每個步驟狀態）
-                _now_time  = now_tw().strftime("%H:%M")
-                _ah_check  = is_after_hours()
-                _hist_ok   = not res.get("hist_df", pd.DataFrame()).empty
-                _pct_val   = res["pct"]
-                _thresh    = st.session_state.tg_threshold
+        ah_badge = (
+            '<div class="card-row"><span class="badge badge-ah">{}</span></div>'.format(ah_impl)
+            if ah_impl else ""
+        )
 
-                with st.expander("🛠 盤後除錯資訊（確認後可移除）"):
-                    st.write("現在時間：", _now_time)
-                    st.write("is_after_hours()：", _ah_check)
-                    st.write("hist_df 有資料：", _hist_ok)
-                    st.write("今日漲跌幅：", round(_pct_val, 2), "%")
-                    st.write("觸發門檻設定：", _thresh, "%")
+        # ── HTML 卡片 ──
+        card_html = """
+        <div class="stock-card">
+          <div class="card-header">
+            <span class="card-title">{name} <span style="font-weight:400;font-size:0.85rem;opacity:0.6;">({sid})</span></span>
+            <div class="card-price-block">
+              <div class="card-price">{price:.2f}</div>
+              <div class="{pct_cls}">{pct_sign} {pct_abs:.2f}%</div>
+            </div>
+          </div>
+          <div class="card-row">
+            <span class="badge badge-grade">{grade}</span>
+            <span class="{action_cls}">{action}</span>
+            <span class="badge badge-src">{source}</span>
+          </div>
+          <div class="card-row">
+            <span class="card-label">指標</span>{ind_badges}
+          </div>
+          <div class="card-row">
+            <span class="card-label">KD</span>
+            <span>K={kval:.1f} D={dval:.1f}</span>
+            <span style="margin-left:8px;opacity:0.5;">│</span>
+            <span class="badge badge-alert">{alert}</span>
+          </div>
+          {ah_badge}
+        </div>
+        """.format(
+            name=name, sid=sid, price=price,
+            pct_cls=pct_cls, pct_sign=pct_sign, pct_abs=abs(pct),
+            grade=grade, action_cls=action_cls, action=action, source=source,
+            ind_badges=ind_badges, kval=kval, dval=dval,
+            alert=full_label, ah_badge=ah_badge,
+        )
 
-                    if _ah_check:
-                        # 逐步執行並顯示每步結果
-                        _dbg_df   = res.get("hist_df", pd.DataFrame())
-                        _dbg_mav5 = get_5mav_from_history(_dbg_df)
-                        st.write("5MAV（5日均量）：", int(_dbg_mav5), "張")
-
-                        _dbg_vol, _dbg_data_date = fetch_finmind_close_volume(stock["id"])
-                        st.write("FinMind 收盤量：", int(_dbg_vol), "張")
-                        st.write("FinMind 資料日期：", _dbg_data_date)
-
-                        if _dbg_mav5 > 0 and _dbg_vol > 0:
-                            _dbg_ratio = _dbg_vol / _dbg_mav5
-                            st.write("量比：", round(_dbg_ratio, 2), "倍")
-                            _dbg_impl = classify_afterhours_implication(
-                                _pct_val, _dbg_vol, _dbg_mav5, _thresh)
-                            st.write("classify_afterhours_implication 結果：",
-                                     _dbg_impl if _dbg_impl else "（空字串，未符合任何條件）")
-                        else:
-                            st.write("⚠️ mav5 或 close_vol 為 0，無法計算意涵")
-                    else:
-                        st.write("⚠️ is_after_hours() = False，盤後邏輯未執行")
-
-                if _ah_check:
-                    hist_df_for_ah = res.get("hist_df", pd.DataFrame())
-                    ah_impl = run_afterhours_analysis(
-                        bid          = browser_id,
-                        stock        = stock,
-                        pct          = res["pct"],
-                        hist_df      = hist_df_for_ah,
-                        tg_threshold = st.session_state.tg_threshold,
-                    )
-                    if ah_impl:
-                        st.caption(ah_impl)
-                    else:
-                        _ah_s  = load_alert_state(browser_id).get("states", {}).get(stock["id"], {})
-                        _ratio = _ah_s.get("ah_ratio", 0)
-                        _vol   = _ah_s.get("ah_vol", 0)
-                        _mav5  = _ah_s.get("ah_mav5", 0)
-                        if _vol > 0 and _mav5 > 0:
-                            st.caption(
-                                "📊 盤後量能：收盤量 {:,} 張　5日均量 {:,} 張　量比 {:.2f} 倍".format(
-                                    round(_vol / 1000), round(_mav5 / 1000), _ratio)
-                            )
-                        else:
-                            st.caption("📊 盤後意涵：FinMind 資料更新中，請稍後重新整理")
-            with col_metric:
-                st.metric("股價", "{:.2f}".format(res["price"]),
-                          "{:+.2f}%".format(res["pct"]), delta_color="inverse")
+        # 用 container 包住，右側放刪除按鈕
+        with st.container():
+            col_card, col_del = st.columns([10, 1])
+            with col_card:
+                st.markdown(card_html, unsafe_allow_html=True)
             with col_del:
-                if st.button("🗑️", key="del_" + stock["id"]):
+                st.markdown("<div style='margin-top:14px'></div>", unsafe_allow_html=True)
+                if st.button("🗑", key="del_" + sid):
                     st.session_state.my_stocks.pop(idx)
                     save_user_stocks(browser_id, st.session_state.my_stocks)
                     st.rerun()
