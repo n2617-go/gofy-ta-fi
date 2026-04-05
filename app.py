@@ -898,7 +898,7 @@ button[kind="secondary"] { padding: 2px 8px !important; font-size: 0.75rem !impo
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🤖 AI 多因子模型分級決策")
+st.title("🤖 台股 AI 技術分級決策支援")
 
 # ── browser_id 初始化 ─────────────────────────────────────────────────────
 if not browser_id:
@@ -1155,8 +1155,8 @@ for idx, stock in enumerate(st.session_state.my_stocks):
                 _mav5  = _ah_s.get("ah_mav5", 0)
                 _ratio = _ah_s.get("ah_ratio", 0)
                 if _vol > 0 and _mav5 > 0:
-                    ah_impl = "📊 盤後量能：{:,}張 / 均{:,}張 / {:.2f}倍".format(
-                        round(_vol / 1000), round(_mav5 / 1000), _ratio)
+                    ah_impl = "📊 盤後量能：{:,}張 / 均量{:,}張 / {:.2f}倍".format(
+                        _vol, _mav5, _ratio)
                 else:
                     ah_impl = "📊 FinMind 資料更新中，請稍後重新整理"
 
