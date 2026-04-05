@@ -1223,7 +1223,7 @@ for idx, stock in enumerate(st.session_state.my_stocks):
         with st.container():
             st.markdown(card_html, unsafe_allow_html=True)
             # 強制橫向：用 use_container_width=False + gap 設為 small
-            b1, b2, b3, _ = st.columns([3, 3, 3, 3], gap="large")
+            b1, b2, b3, _ = st.columns([5, 5, 5, 5], gap="large")
             with b1:
                 if st.button("🗑", key="del_" + sid, use_container_width=True):
                     st.session_state.my_stocks.pop(idx)
