@@ -906,11 +906,11 @@ button[kind="secondary"] { padding: 2px 8px !important; font-size: 0.75rem !impo
     flex: 0 0 auto !important;
 }
 
-/* 排序/刪除按鈕放大 2 倍 */
+/* 排序/刪除按鈕放大 */
 [data-testid="stHorizontalBlock"] button {
-    font-size: 1.6rem !important;
-    height: 3.2rem !important;
-    min-width: 3.2rem !important;
+    font-size: 1.4rem !important;
+    height: 3rem !important;
+    width: 100% !important;
     padding: 0 !important;
     line-height: 1 !important;
 }
@@ -1223,7 +1223,7 @@ for idx, stock in enumerate(st.session_state.my_stocks):
         with st.container():
             st.markdown(card_html, unsafe_allow_html=True)
             # 強制橫向：用 use_container_width=False + gap 設為 small
-            b1, b2, b3, _ = st.columns([2, 2, 2, 6], gap="medium")
+            b1, b2, b3, _ = st.columns([3, 3, 3, 3], gap="large")
             with b1:
                 if st.button("🗑", key="del_" + sid, use_container_width=True):
                     st.session_state.my_stocks.pop(idx)
@@ -1249,7 +1249,7 @@ for idx, stock in enumerate(st.session_state.my_stocks):
             sid   = stock["id"]
             total = len(st.session_state.my_stocks)
             st.warning("⚠️ **{} ({})** 資料抓取失敗，請確認代號或稍後再試。".format(name, sid))
-            b1, b2, b3, _ = st.columns([2, 2, 2, 6], gap="medium")
+            b1, b2, b3, _ = st.columns([3, 3, 3, 3], gap="large")
             with b1:
                 if st.button("🗑", key="del_err_" + sid, use_container_width=True):
                     st.session_state.my_stocks.pop(idx)
