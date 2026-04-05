@@ -895,6 +895,16 @@ button[kind="secondary"] { padding: 2px 8px !important; font-size: 0.75rem !impo
 
 /* 隱藏 metric 預設大字 */
 [data-testid="stMetric"] { display: none !important; }
+
+/* 強制按鈕列橫向排列，不換行 */
+[data-testid="stHorizontalBlock"] {
+    flex-wrap: nowrap !important;
+    gap: 4px !important;
+}
+[data-testid="stHorizontalBlock"] > div {
+    min-width: 0 !important;
+    flex: 0 0 auto !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -1203,22 +1213,23 @@ for idx, stock in enumerate(st.session_state.my_stocks):
         total = len(st.session_state.my_stocks)
         with st.container():
             st.markdown(card_html, unsafe_allow_html=True)
-            btn_cols = st.columns([1, 1, 1, 8])
-            with btn_cols[0]:
-                if st.button("🗑", key="del_" + sid, help="刪除"):
+            # 強制橫向：用 use_container_width=False + gap 設為 small
+            b1, b2, b3, _ = st.columns([1, 1, 1, 9], gap="small")
+            with b1:
+                if st.button("🗑", key="del_" + sid, use_container_width=True):
                     st.session_state.my_stocks.pop(idx)
                     save_user_stocks(browser_id, st.session_state.my_stocks)
                     st.rerun()
-            with btn_cols[1]:
+            with b2:
                 if idx > 0:
-                    if st.button("⬆️", key="up_" + sid, help="上移"):
+                    if st.button("⬆️", key="up_" + sid, use_container_width=True):
                         stocks = st.session_state.my_stocks
                         stocks[idx], stocks[idx - 1] = stocks[idx - 1], stocks[idx]
                         save_user_stocks(browser_id, stocks)
                         st.rerun()
-            with btn_cols[2]:
+            with b3:
                 if idx < total - 1:
-                    if st.button("⬇️", key="dn_" + sid, help="下移"):
+                    if st.button("⬇️", key="dn_" + sid, use_container_width=True):
                         stocks = st.session_state.my_stocks
                         stocks[idx], stocks[idx + 1] = stocks[idx + 1], stocks[idx]
                         save_user_stocks(browser_id, stocks)
@@ -1229,22 +1240,22 @@ for idx, stock in enumerate(st.session_state.my_stocks):
             sid   = stock["id"]
             total = len(st.session_state.my_stocks)
             st.warning("⚠️ **{} ({})** 資料抓取失敗，請確認代號或稍後再試。".format(name, sid))
-            btn_cols = st.columns([1, 1, 1, 8])
-            with btn_cols[0]:
-                if st.button("🗑", key="del_err_" + sid, help="刪除"):
+            b1, b2, b3, _ = st.columns([1, 1, 1, 9], gap="small")
+            with b1:
+                if st.button("🗑", key="del_err_" + sid, use_container_width=True):
                     st.session_state.my_stocks.pop(idx)
                     save_user_stocks(browser_id, st.session_state.my_stocks)
                     st.rerun()
-            with btn_cols[1]:
+            with b2:
                 if idx > 0:
-                    if st.button("⬆️", key="up_err_" + sid, help="上移"):
+                    if st.button("⬆️", key="up_err_" + sid, use_container_width=True):
                         stocks = st.session_state.my_stocks
                         stocks[idx], stocks[idx - 1] = stocks[idx - 1], stocks[idx]
                         save_user_stocks(browser_id, stocks)
                         st.rerun()
-            with btn_cols[2]:
+            with b3:
                 if idx < total - 1:
-                    if st.button("⬇️", key="dn_err_" + sid, help="下移"):
+                    if st.button("⬇️", key="dn_err_" + sid, use_container_width=True):
                         stocks = st.session_state.my_stocks
                         stocks[idx], stocks[idx + 1] = stocks[idx + 1], stocks[idx]
                         save_user_stocks(browser_id, stocks)
