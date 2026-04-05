@@ -836,7 +836,7 @@ st.markdown("""
     margin-bottom: 6px;
 }
 .card-title {
-    font-size: 1.05rem;
+    font-size: 1.35rem;
     font-weight: 700;
     letter-spacing: 0.01em;
 }
@@ -845,42 +845,42 @@ st.markdown("""
     line-height: 1.2;
 }
 .card-price {
-    font-size: 1.3rem;
+    font-size: 1.7rem;
     font-weight: 800;
     letter-spacing: -0.02em;
 }
-.card-pct-up   { color: #ff6b6b; font-size: 0.8rem; font-weight: 600; }
-.card-pct-down { color: #51cf66; font-size: 0.8rem; font-weight: 600; }
-.card-pct-flat { color: #868e96; font-size: 0.8rem; font-weight: 600; }
+.card-pct-up   { color: #ff6b6b; font-size: 1.0rem; font-weight: 600; }
+.card-pct-down { color: #51cf66; font-size: 1.0rem; font-weight: 600; }
+.card-pct-flat { color: #868e96; font-size: 1.0rem; font-weight: 600; }
 
 /* 資訊列 */
 .card-row {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 6px;
-    margin-bottom: 4px;
-    font-size: 0.78rem;
+    gap: 8px;
+    margin-bottom: 6px;
+    font-size: 1.0rem;
     color: rgba(255,255,255,0.75);
 }
-.card-label { color: rgba(255,255,255,0.45); font-size: 0.72rem; margin-right: 2px; }
+.card-label { color: rgba(255,255,255,0.45); font-size: 0.9rem; margin-right: 2px; }
 
 /* Badge 標籤 */
 .badge {
     display: inline-block;
-    padding: 1px 7px;
+    padding: 3px 10px;
     border-radius: 20px;
-    font-size: 0.70rem;
+    font-size: 0.9rem;
     font-weight: 600;
     letter-spacing: 0.02em;
     white-space: nowrap;
 }
 .badge-grade  { background: rgba(99,179,237,0.18);  color: #63b3ed; }
-.badge-ind    { background: rgba(72,187,120,0.15);  color: #48bb78; font-size: 0.68rem; }
+.badge-ind    { background: rgba(72,187,120,0.15);  color: #48bb78; font-size: 0.88rem; }
 .badge-ah     { background: rgba(246,173,85,0.18);  color: #f6ad55; }
 .badge-alert  { background: rgba(160,174,192,0.12); color: #a0aec0; }
 .badge-src    { background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.35);
-                font-size: 0.65rem; }
+                font-size: 0.82rem; }
 
 /* 決策文字顏色 */
 .action-red    { color: #fc8181; font-weight: 700; }
