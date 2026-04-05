@@ -898,7 +898,7 @@ button[kind="secondary"] { padding: 2px 8px !important; font-size: 0.75rem !impo
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🤖 台股 AI 技術分級決策支援")
+st.title("🤖 AI 多因子模型分級決策")
 
 # ── browser_id 初始化 ─────────────────────────────────────────────────────
 if not browser_id:
