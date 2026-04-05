@@ -907,13 +907,13 @@ with st.sidebar:
                 grade  = res["grade"]
                 action = res["action"]
                 inds   = ", ".join(res["details"]) if res["details"] else "無"
-                # 盤後時段附上盤後意涵
+                # 盤後時段附上盤後意涵（ah_impl 本身已含標籤，直接換行附上）
                 ah_line = ""
                 if is_after_hours():
                     _ah_s_m  = load_alert_state(browser_id).get("states", {}).get(sid, {})
                     _ah_impl = _ah_s_m.get("ah_impl", "")
                     if _ah_impl:
-                        ah_line = "\n盤後意涵：{}".format(_ah_impl)
+                        ah_line = "\n{}".format(_ah_impl)
 
                 msg = (
                     "🔔 <b>【手動掃描通知】</b>\n\n"
@@ -1084,7 +1084,7 @@ for idx, stock in enumerate(st.session_state.my_stocks):
                         if _vol > 0 and _mav5 > 0:
                             st.caption(
                                 "📊 盤後量能：收盤量 {:,} 張　5日均量 {:,} 張　量比 {:.2f} 倍".format(
-                                    _vol, _mav5, _ratio)
+                                    round(_vol / 1000), round(_mav5 / 1000), _ratio)
                             )
                         else:
                             st.caption("📊 盤後意涵：FinMind 資料更新中，請稍後重新整理")
