@@ -908,8 +908,8 @@ button[kind="secondary"] { padding: 2px 8px !important; font-size: 0.75rem !impo
 
 /* 排序/刪除按鈕放大 */
 [data-testid="stHorizontalBlock"] button {
-    font-size: 1.4rem !important;
-    height: 3rem !important;
+    font-size: 1.8rem !important;
+    height: 3.5rem !important;
     width: 100% !important;
     padding: 0 !important;
     line-height: 1 !important;
