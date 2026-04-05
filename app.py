@@ -1214,7 +1214,7 @@ for idx, stock in enumerate(st.session_state.my_stocks):
         with st.container():
             st.markdown(card_html, unsafe_allow_html=True)
             # 強制橫向：用 use_container_width=False + gap 設為 small
-            b1, b2, b3, _ = st.columns([1, 1, 1, 9], gap="small")
+            b1, b2, b3, _ = st.columns([2, 2, 2, 6], gap="medium")
             with b1:
                 if st.button("🗑", key="del_" + sid, use_container_width=True):
                     st.session_state.my_stocks.pop(idx)
@@ -1240,7 +1240,7 @@ for idx, stock in enumerate(st.session_state.my_stocks):
             sid   = stock["id"]
             total = len(st.session_state.my_stocks)
             st.warning("⚠️ **{} ({})** 資料抓取失敗，請確認代號或稍後再試。".format(name, sid))
-            b1, b2, b3, _ = st.columns([1, 1, 1, 9], gap="small")
+            b1, b2, b3, _ = st.columns([2, 2, 2, 6], gap="medium")
             with b1:
                 if st.button("🗑", key="del_err_" + sid, use_container_width=True):
                     st.session_state.my_stocks.pop(idx)
