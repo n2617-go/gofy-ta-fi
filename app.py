@@ -468,11 +468,19 @@ def run_afterhours_analysis(bid: str, stock: dict, pct: float,
     states      = alert_state.setdefault("states", {})
     s           = states.setdefault(stock_id, {})
 
-    # ── 快取命中：今天已算過，直接回傳 ──
-    if "ah_impl" in s and "ah_date" in s and s["ah_date"] == today_str():
+    # ── 快取命中判斷：日期相同 且 門檻相同 才直接回傳 ──
+    # 門檻改變時需重新計算（避免調整門檻後仍顯示舊結果）
+    cached_date    = s.get("ah_date", "")
+    cached_thresh  = s.get("ah_threshold", None)
+    cache_valid    = (
+        "ah_impl" in s and
+        cached_date == today_str() and
+        cached_thresh == tg_threshold
+    )
+    if cache_valid:
         return s["ah_impl"]
 
-    # ── 快取未命中：重新計算 ──
+    # ── 快取未命中或門檻已變更：重新計算 ──
     mav5 = get_5mav_from_history(hist_df)
     if mav5 <= 0:
         return ""
@@ -483,10 +491,11 @@ def run_afterhours_analysis(bid: str, stock: dict, pct: float,
 
     impl = classify_afterhours_implication(pct, close_vol, mav5, tg_threshold)
 
-    # ── 存入快取（不管有沒有意涵都存，避免重複呼叫 FinMind）──
+    # ── 存入快取 ──
     s["ah_impl"]      = impl
     s["ah_date"]      = today_str()
-    s["ah_data_date"] = data_date   # FinMind 資料的實際交易日期（除錯用）
+    s["ah_threshold"] = tg_threshold   # 記錄計算時的門檻，門檻變動時自動失效
+    s["ah_data_date"] = data_date
     s["ah_vol"]       = int(close_vol)
     s["ah_mav5"]      = int(mav5)
     s["ah_ratio"]     = round(close_vol / mav5, 2) if mav5 > 0 else 0
