@@ -1199,67 +1199,56 @@ for idx, stock in enumerate(st.session_state.my_stocks):
             alert=full_label, ah_badge=ah_badge,
         )
 
-        # 用 container 包住，右側放排序 + 刪除按鈕
+        # 卡片 + 下方橫向按鈕列（🗑 ⬆️ ⬇️）
         total = len(st.session_state.my_stocks)
         with st.container():
-            col_card, col_ctrl = st.columns([10, 1])
-            with col_card:
-                st.markdown(card_html, unsafe_allow_html=True)
-            with col_ctrl:
-                st.markdown("<div style='margin-top:10px'></div>", unsafe_allow_html=True)
-                # ⬆️ 上移（第一張不顯示）
+            st.markdown(card_html, unsafe_allow_html=True)
+            btn_cols = st.columns([1, 1, 1, 8])
+            with btn_cols[0]:
+                if st.button("🗑", key="del_" + sid, help="刪除"):
+                    st.session_state.my_stocks.pop(idx)
+                    save_user_stocks(browser_id, st.session_state.my_stocks)
+                    st.rerun()
+            with btn_cols[1]:
                 if idx > 0:
                     if st.button("⬆️", key="up_" + sid, help="上移"):
                         stocks = st.session_state.my_stocks
                         stocks[idx], stocks[idx - 1] = stocks[idx - 1], stocks[idx]
                         save_user_stocks(browser_id, stocks)
                         st.rerun()
-                else:
-                    st.markdown("<div style='height:32px'></div>", unsafe_allow_html=True)
-                # ⬇️ 下移（最後一張不顯示）
+            with btn_cols[2]:
                 if idx < total - 1:
                     if st.button("⬇️", key="dn_" + sid, help="下移"):
                         stocks = st.session_state.my_stocks
                         stocks[idx], stocks[idx + 1] = stocks[idx + 1], stocks[idx]
                         save_user_stocks(browser_id, stocks)
                         st.rerun()
-                else:
-                    st.markdown("<div style='height:32px'></div>", unsafe_allow_html=True)
-                # 🗑 刪除
-                if st.button("🗑", key="del_" + sid, help="刪除"):
-                    st.session_state.my_stocks.pop(idx)
-                    save_user_stocks(browser_id, st.session_state.my_stocks)
-                    st.rerun()
     else:
         with st.container():
             name  = stock["name"]
             sid   = stock["id"]
             total = len(st.session_state.my_stocks)
-            col_warn, col_ctrl = st.columns([10, 1])
-            with col_warn:
-                st.warning("⚠️ **{} ({})** 資料抓取失敗，請確認代號或稍後再試。".format(name, sid))
-            with col_ctrl:
-                st.markdown("<div style='margin-top:8px'></div>", unsafe_allow_html=True)
+            st.warning("⚠️ **{} ({})** 資料抓取失敗，請確認代號或稍後再試。".format(name, sid))
+            btn_cols = st.columns([1, 1, 1, 8])
+            with btn_cols[0]:
+                if st.button("🗑", key="del_err_" + sid, help="刪除"):
+                    st.session_state.my_stocks.pop(idx)
+                    save_user_stocks(browser_id, st.session_state.my_stocks)
+                    st.rerun()
+            with btn_cols[1]:
                 if idx > 0:
                     if st.button("⬆️", key="up_err_" + sid, help="上移"):
                         stocks = st.session_state.my_stocks
                         stocks[idx], stocks[idx - 1] = stocks[idx - 1], stocks[idx]
                         save_user_stocks(browser_id, stocks)
                         st.rerun()
-                else:
-                    st.markdown("<div style='height:32px'></div>", unsafe_allow_html=True)
+            with btn_cols[2]:
                 if idx < total - 1:
                     if st.button("⬇️", key="dn_err_" + sid, help="下移"):
                         stocks = st.session_state.my_stocks
                         stocks[idx], stocks[idx + 1] = stocks[idx + 1], stocks[idx]
                         save_user_stocks(browser_id, stocks)
                         st.rerun()
-                else:
-                    st.markdown("<div style='height:32px'></div>", unsafe_allow_html=True)
-                if st.button("🗑", key="del_err_" + sid, help="刪除"):
-                    st.session_state.my_stocks.pop(idx)
-                    save_user_stocks(browser_id, st.session_state.my_stocks)
-                    st.rerun()
 
 if st.button("🔄 手動重新整理"):
     st.cache_data.clear()
