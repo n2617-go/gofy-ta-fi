@@ -1211,10 +1211,18 @@ for idx, stock in enumerate(st.session_state.my_stocks):
                     save_user_stocks(browser_id, st.session_state.my_stocks)
                     st.rerun()
     else:
-        with st.container(border=True):
+        with st.container():
             name = stock["name"]
             sid  = stock["id"]
-            st.warning("⚠️ **{} ({})** 資料抓取失敗，請確認代號或稍後再試。".format(name, sid))
+            col_warn, col_del = st.columns([10, 1])
+            with col_warn:
+                st.warning("⚠️ **{} ({})** 資料抓取失敗，請確認代號或稍後再試。".format(name, sid))
+            with col_del:
+                st.markdown("<div style='margin-top:8px'></div>", unsafe_allow_html=True)
+                if st.button("🗑", key="del_err_" + sid):
+                    st.session_state.my_stocks.pop(idx)
+                    save_user_stocks(browser_id, st.session_state.my_stocks)
+                    st.rerun()
 
 if st.button("🔄 手動重新整理"):
     st.cache_data.clear()
