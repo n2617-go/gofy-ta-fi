@@ -371,14 +371,17 @@ def fetch_momentum_analysis(stock_id: str, pct: float = 0.0,
 def get_5mav_from_history(hist_df: pd.DataFrame) -> float:
     """
     從 yfinance 歷史 DataFrame 取「今天以前」連續 5 個交易日的成交量平均。
+    yfinance Volume 單位為「股」，除以 1000 轉換成「張」與 FinMind 統一。
     hist_df 已在 get_history_cached() 中過濾掉今天，直接取最後 5 筆即可。
     """
     if hist_df.empty or "Volume" not in hist_df.columns:
         return 0.0
     vols = pd.to_numeric(hist_df["Volume"], errors="coerce").dropna()
     if len(vols) < 5:
-        return float(vols.mean()) if len(vols) > 0 else 0.0
-    return float(vols.iloc[-5:].mean())
+        avg = float(vols.mean()) if len(vols) > 0 else 0.0
+    else:
+        avg = float(vols.iloc[-5:].mean())
+    return round(avg / 1000)   # 股 → 張
 
 
 def fetch_finmind_close_volume(stock_id: str) -> tuple:
@@ -407,11 +410,13 @@ def fetch_finmind_close_volume(stock_id: str) -> tuple:
         data_date = str(row.get(date_col, ""))
 
         # FinMind taiwan_stock_daily 成交量欄位名稱（依優先順序嘗試）
+        # Trading_Volume 單位為「股」，除以 1000 四捨五入轉換成「張」
         for col in ["Trading_Volume", "volume", "Volume", "vol", "trading_volume"]:
             if col in row.index and row[col] not in [None, "", "nan"]:
                 val = float(row[col])
                 if val > 0:
-                    return val, data_date
+                    val_lots = round(val / 1000)   # 股 → 張
+                    return float(val_lots), data_date
 
         # 除錯：印出實際欄位名稱供檢查
         return 0.0, "欄位: " + str(list(row.index))
@@ -902,6 +907,14 @@ with st.sidebar:
                 grade  = res["grade"]
                 action = res["action"]
                 inds   = ", ".join(res["details"]) if res["details"] else "無"
+                # 盤後時段附上盤後意涵
+                ah_line = ""
+                if is_after_hours():
+                    _ah_s_m  = load_alert_state(browser_id).get("states", {}).get(sid, {})
+                    _ah_impl = _ah_s_m.get("ah_impl", "")
+                    if _ah_impl:
+                        ah_line = "\n盤後意涵：{}".format(_ah_impl)
+
                 msg = (
                     "🔔 <b>【手動掃描通知】</b>\n\n"
                     "標的：<b>{} ({})</b>\n"
@@ -909,8 +922,8 @@ with st.sidebar:
                     "今日漲跌：<b>{:+.2f}%</b>\n"
                     "技術評級：{}\n"
                     "建議決策：<b>{}</b>\n\n"
-                    "符合指標：{}"
-                ).format(name, sid, price, pct_v, grade, action, inds)
+                    "符合指標：{}{}"
+                ).format(name, sid, price, pct_v, grade, action, inds, ah_line)
                 send_telegram(st.session_state.tg_token, st.session_state.tg_chat_id, msg)
                 found += 1
         st.success("掃描完成，已發送 {} 則通知".format(found))
