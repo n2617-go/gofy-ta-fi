@@ -268,9 +268,9 @@ def fetch_all_quotes() -> dict:
 
 
 @st.cache_data(ttl=60)
-def fetch_single_quote(stock_id: str) -> dict:
+def fetch_single_quote_finmind(stock_id: str) -> dict:
     """
-    無 Token 時的備援：逐支股票抓即時快照。
+    有 Token 時：用 FinMind taiwan_stock_tick_snapshot 抓單支即時報價。
     回傳 {"price": float, "pct": float, "open": float} 或空 dict。
     """
     try:
@@ -288,17 +288,54 @@ def fetch_single_quote(stock_id: str) -> dict:
         return {}
 
 
+@st.cache_data(ttl=60)
+def fetch_single_quote_yfinance(stock_id: str) -> dict:
+    """
+    無 Token 時的備援：用 yfinance 抓今日 1 分 K 取最新一根報價。
+    回傳 {"price": float, "pct": float, "open": float} 或空 dict。
+    """
+    for suffix in [".TW", ".TWO"]:
+        try:
+            ticker = yf.Ticker(stock_id + suffix)
+            df = ticker.history(period="1d", interval="1m")
+            if df is None or df.empty:
+                continue
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            last  = df.iloc[-1]
+            first = df.iloc[0]
+            price    = float(last["Close"])
+            open_p   = float(first["Open"])
+            prev_close = ticker.info.get("previousClose", open_p) or open_p
+            pct = (price - prev_close) / prev_close * 100 if prev_close > 0 else 0.0
+            return {"price": price, "pct": round(pct, 2), "open": open_p}
+        except Exception:
+            continue
+    return {}
+
+
 def get_quote(stock_id: str) -> dict:
     """
-    取得單一股票即時報價。
-    優先從全市場快照取（有 Token），
-    快照無資料時 fallback 到逐支查詢。
+    取得單一股票即時報價，三層優先順序：
+    1. 全市場快照（有 Token，最省 API）
+    2. FinMind 單支查詢（有 Token 但全市場快照沒這支）
+    3. yfinance 1 分 K（無 Token 時的可靠備援）
     """
+    token = st.session_state.get("finmind_token", "")
+
+    # 層級 1：全市場快照
     quotes = fetch_all_quotes()
     if stock_id in quotes:
         return quotes[stock_id]
-    # Fallback：逐支查詢（無 Token 或全市場快照失敗時）
-    return fetch_single_quote(stock_id)
+
+    # 層級 2：FinMind 單支（需 Token）
+    if token:
+        result = fetch_single_quote_finmind(stock_id)
+        if result:
+            return result
+
+    # 層級 3：yfinance 1 分 K（不需 Token）
+    return fetch_single_quote_yfinance(stock_id)
 
 
 # ===========================================================================
@@ -600,7 +637,7 @@ def stitch_with_quote(hist_df: pd.DataFrame, stock_id: str) -> tuple:
 
     quote = get_quote(stock_id)
     if not quote:
-        return hist_df, "🗂 yfinance 歷史（報價取得失敗）"
+        return hist_df, "🗂 yfinance 歷史（即時報價暫無）"
 
     today = pd.Timestamp(today_str())
     # 用昨日收盤價計算今日 Open（若報價沒有 open 則用昨收）
