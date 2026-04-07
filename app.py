@@ -1,3 +1,4 @@
+
 import streamlit as st
 import akshare as ak
 import yfinance as yf
@@ -38,19 +39,16 @@ def is_market_open() -> bool:
     return MARKET_OPEN <= n.time() <= MARKET_CLOSE
 
 def is_after_hours() -> bool:
-    n = now_tw()
-    t = n.time()
-    wday = n.weekday()
+    n, t, wday = now_tw(), now_tw().time(), now_tw().weekday()
     if wday >= 5: return True
-    if t >= AFTERHOURS_START: return True
-    if t < MARKET_OPEN: return True
+    if t >= AFTERHOURS_START or t < MARKET_OPEN: return True
     return False
 
 def today_str() -> str:
     return now_tw().strftime("%Y-%m-%d")
 
 # ===========================================================================
-# --- 1. 使用者識別與資料管理 ---
+# --- 1. 使用者識別與 Local Storage ---
 # ===========================================================================
 def get_browser_id_component():
     components.html(f"""
@@ -80,8 +78,7 @@ def load_user_stocks(bid: str) -> list:
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, list): return data
+                return json.load(f)
         except: pass
     return list(DEFAULT_STOCKS)
 
@@ -96,7 +93,7 @@ def load_alert_state(bid: str) -> dict:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            if data.get("date") == today: return data
+                if data.get("date") == today: return data
         except: pass
     return {"date": today, "states": {}}
 
@@ -105,35 +102,27 @@ def save_alert_state(bid: str, state: dict):
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 # ===========================================================================
-# --- 2. AKShare 即時報價引擎 (替代 FinMind TaiwanStockQuote) ---
+# --- 2. 數據引擎：AKShare 即時 + yfinance 歷史 ---
 # ===========================================================================
 @st.cache_data(ttl=60)
 def get_ak_quote(stock_id: str) -> dict:
-    """使用 AKShare 抓取新浪即時報價"""
     try:
         df = ak.stock_hk_gj_tw_sina(symbol=stock_id)
         if not df.empty:
             row = df.iloc[0]
             return {
-                "price": float(row['last']),
-                "pct": float(row['pct_change']),
-                "open": float(row['open']),
-                "high": float(row['high']),
-                "low": float(row['low']),
-                "source": "AKShare (即時)"
+                "price": float(row['last']), "pct": float(row['pct_change']),
+                "open": float(row['open']), "high": float(row['high']),
+                "low": float(row['low']), "source": "AKShare (即時)"
             }
     except: pass
     return {}
 
-# ===========================================================================
-# --- 3. 核心運算與指標 (yfinance 歷史 + AKShare 縫合) ---
-# ===========================================================================
 def get_history_cached(stock_id: str) -> pd.DataFrame:
-    cache = st.session_state.hist_cache
-    today = today_str()
+    cache, today = st.session_state.hist_cache, today_str()
     if stock_id in cache and cache[stock_id]["cached_date"] == today:
         return cache[stock_id]["df"].copy()
-
+    
     df = pd.DataFrame()
     for suffix in [".TW", ".TWO"]:
         try:
@@ -147,31 +136,13 @@ def get_history_cached(stock_id: str) -> pd.DataFrame:
     if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
     df = df.astype(float).ffill()
     df.index = pd.to_datetime(df.index).normalize()
-    # 過濾掉今天，只留歷史
     df = df[df.index < pd.Timestamp(today)]
     cache[stock_id] = {"df": df, "cached_date": today}
     return df.copy()
 
-def stitch_with_ak(hist_df: pd.DataFrame, stock_id: str) -> tuple:
-    """用 AKShare 即時報價縫合今日棒"""
-    quote = get_ak_quote(stock_id)
-    if not quote or not is_market_open():
-        return hist_df, "🗂 yfinance 歷史"
-
-    today = pd.Timestamp(today_str())
-    today_row = pd.Series({
-        "Open": quote["open"], "High": quote["high"],
-        "Low": quote["low"], "Close": quote["price"], "Volume": 0.0
-    }, name=today)
-
-    merged = pd.concat([hist_df, pd.DataFrame([today_row])])
-    return merged[~merged.index.duplicated(keep="last")].sort_index(), "📡 AKShare 即時縫合"
-
 def calc_indicators(df: pd.DataFrame):
     if len(df) < 30: return None
-    close = pd.Series(df["Close"].values.flatten(), index=df.index).astype(float)
-    high = pd.Series(df["High"].values.flatten(), index=df.index).astype(float)
-    low = pd.Series(df["Low"].values.flatten(), index=df.index).astype(float)
+    close, high, low = df["Close"], df["High"], df["Low"]
     try:
         df = df.copy()
         df["MA5"] = SMAIndicator(close, window=5).sma_indicator()
@@ -189,117 +160,140 @@ def calc_indicators(df: pd.DataFrame):
 def fetch_and_analyze(stock_id: str):
     hist_df = get_history_cached(stock_id)
     if hist_df.empty: return None
-    df, source = stitch_with_ak(hist_df, stock_id)
+    
+    quote = get_ak_quote(stock_id)
+    df = hist_df.copy()
+    source = "🗂 yfinance 歷史"
+    
+    if quote and is_market_open():
+        today_row = pd.Series({"Open": quote["open"], "High": quote["high"], "Low": quote["low"], "Close": quote["price"], "Volume": 0.0}, name=pd.Timestamp(today_str()))
+        df = pd.concat([df, pd.DataFrame([today_row])])
+        df = df[~df.index.duplicated(keep="last")].sort_index()
+        source = "📡 AKShare 即時縫合"
+        
     df = calc_indicators(df)
     if df is None: return None
-
     last, prev = df.iloc[-1], df.iloc[-2]
-    score, details = 0, []
     
+    score, details = 0, []
     if last["MA5"] > last["MA10"] > last["MA20"]: details.append("✅ 均線多頭排列"); score += 1
-    if prev["K"] <= prev["D"] and last["K"] > last["D"] and (last["K"] - last["D"]) >= 1.0:
-        avg = (last["K"] + last["D"]) / 2
-        if avg < 80: details.append("✅ KD 金叉"); score += 1
+    if prev["K"] <= prev["D"] and last["K"] > last["D"] and (last["K"]-last["D"]) >= 1.0:
+        if (last["K"]+last["D"])/2 < 80: details.append("✅ KD 金叉"); score += 1
     if last["MACD_diff"] > 0: details.append("✅ MACD 柱狀體轉正"); score += 1
     if last["RSI"] > 50: details.append("✅ RSI 強勢區"); score += 1
     if last["Close"] > last["BBM"]: details.append("✅ 站穩月線(MA20)"); score += 1
 
-    dm = {5: ("S (極強)", "🔥 續抱/加碼", "red"), 4: ("A (強勢)", "🚀 偏多持股", "orange"),
-          3: ("B (轉強)", "📈 少量試單", "green"), 2: ("C (盤整)", "⚖️ 暫時觀望", "blue"),
-          1: ("D (弱勢)", "📉 減碼避險", "gray"), 0: ("E (極弱)", "🚫 觀望不進場", "black")}
+    dm = {5:("S (極強)","🔥 續抱/加碼","red"), 4:("A (強勢)","🚀 偏多持股","orange"), 3:("B (轉強)","📈 少量試單","green"), 2:("C (盤整)","⚖️ 暫時觀望","blue"), 1:("D (弱勢)","📉 減碼避險","gray"), 0:("E (極弱)","🚫 觀望不進場","black")}
     grade, action, color = dm[score]
-
-    quote = get_ak_quote(stock_id)
-    pct = quote.get("pct", ((last["Close"]-prev["Close"])/prev["Close"]*100)) if quote else ((last["Close"]-prev["Close"])/prev["Close"]*100)
     
-    return {
-        "price": last["Close"], "pct": pct, "grade": grade, "action": action, 
-        "color": color, "details": details, "k": last["K"], "d": last["D"], 
-        "source": source, "hist_df": hist_df
-    }
+    return {"price": last["Close"], "pct": quote.get("pct", (last["Close"]-prev["Close"])/prev["Close"]*100), "grade": grade, "action": action, "color": color, "details": details, "k": last["K"], "d": last["D"], "source": source, "hist_df": hist_df}
 
 # ===========================================================================
-# --- 4. 通知與動能分析 (FinMind 僅用於觸發時的深度分析) ---
+# --- 3. UI 樣式與通知 ---
 # ===========================================================================
-def send_telegram(msg: str):
-    token, cid = st.session_state.tg_token, st.session_state.tg_chat_id
-    if token and cid:
-        try: requests.post(f"https://api.telegram.org/bot{token}/sendMessage", 
-                           json={"chat_id": cid, "text": msg, "parse_mode": "HTML"}, timeout=5)
-        except: pass
+st.set_page_config(page_title="台股 AI 決策系統 V8.5", layout="centered")
 
-def fetch_momentum_finmind(stock_id: str, pct: float, threshold: float):
-    """觸發瞬間才呼叫 FinMind 深度動能"""
-    try:
-        dl = DataLoader()
-        if st.session_state.finmind_token: dl.login_by_token(st.session_state.finmind_token)
-        df = dl.taiwan_stock_minute(stock_id=stock_id, start_date=today_str(), end_date=today_str())
-        if df.empty: return ""
-        recent = df.tail(6)
-        cur_v, avg_v = recent.iloc[-1]['volume'], recent.iloc[:-1]['volume'].mean()
-        ratio = cur_v / avg_v if avg_v > 0 else 0
-        label = "🚀 帶量突破" if pct >= threshold and ratio >= 1.5 else "💣 帶量殺盤" if pct <= -threshold and ratio >= 1.5 else "🔍 量能正常"
-        return f"\n當前量：{int(cur_v)} 張 | 量能比：{ratio:.1f}倍\n短線意涵：{label}"
-    except: return ""
-
-# ===========================================================================
-# --- 5. UI 介面與主循環 ---
-# ===========================================================================
-st.set_page_config(page_title="台股 AI 決策系統 V8.0 (AKShare)", layout="centered")
-
-# --- CSS 樣式省略 (保持您原本的美化樣式) ---
-st.markdown("<style>...</style>", unsafe_allow_html=True) # 此處建議貼回您原本強大的 CSS 部分
+st.markdown("""
+<style>
+.stock-card { background: #1e1e2e; border: 1px solid rgba(255,255,255,0.1); border-radius: 12px; padding: 15px; margin-bottom: 10px; }
+.card-header { display: flex; justify-content: space-between; align-items: center; }
+.card-price { font-size: 1.8rem; font-weight: 800; color: #fff; }
+.badge { padding: 4px 10px; border-radius: 20px; font-size: 0.85rem; font-weight: 600; margin-right: 5px; }
+.action-red { color: #ff4b4b; font-weight: 700; }
+.action-orange { color: #ffa500; font-weight: 700; }
+.action-green { color: #00ff7f; font-weight: 700; }
+</style>
+""", unsafe_allow_html=True)
 
 if "initialized" not in st.session_state:
-    st.session_state.update({
-        "tg_token": "", "tg_chat_id": "", "tg_threshold": 3.0, "tg_reset": 1.0,
-        "finmind_token": "", "initialized": True, "hist_cache": {}, "my_stocks": []
-    })
+    st.session_state.update({"tg_token": "", "tg_chat_id": "", "tg_threshold": 3.0, "tg_reset": 1.0, "finmind_token": "", "initialized": True, "hist_cache": {}, "my_stocks": []})
 
 get_browser_id_component()
-bid = st.query_params.get("bid", "")
-if not bid: st.stop()
+browser_id = st.query_params.get("bid", "")
+if not browser_id: st.stop()
 
-if st.session_state.get("last_bid") != bid:
-    st.session_state.my_stocks = load_user_stocks(bid)
-    st.session_state.last_bid = bid
+if st.session_state.get("last_bid") != browser_id:
+    st.session_state.my_stocks = load_user_stocks(browser_id)
+    st.session_state.last_bid = browser_id
 
-st.title("🤖 台股 AI 技術分級決策 (AKShare)")
-
-# 新增股票 UI
-with st.expander("🔍 新增自選股票"):
+# --- 新增股票 ---
+with st.container(border=True):
+    st.subheader("🔍 新增自選股票")
     c1, c2, c3 = st.columns([2, 3, 1.2])
-    nid, nname = c1.text_input("代號"), c2.text_input("名稱")
-    if c3.button("➕ 新增") and nid and nname:
-        st.session_state.my_stocks.append({"id": nid, "name": nname})
-        save_user_stocks(bid, st.session_state.my_stocks)
+    n_id, n_name = c1.text_input("代號"), c2.text_input("名稱")
+    if c3.button("➕ 新增", use_container_width=True) and n_id and n_name:
+        st.session_state.my_stocks.append({"id": n_id, "name": n_name})
+        save_user_stocks(browser_id, st.session_state.my_stocks)
         st.rerun()
 
-# 股票清單顯示
+# --- 股票列表 ---
+st.divider()
 for idx, stock in enumerate(st.session_state.my_stocks):
     res = fetch_and_analyze(stock["id"])
     if res:
-        # --- 通知邏輯 (整合 AKShare 觸發) ---
-        alert_state = load_alert_state(bid)
-        s_state = alert_state["states"].setdefault(stock["id"], {"alerted": False})
+        sid, name = stock["id"], stock["name"]
+        pct_color = "#ff4b4b" if res["pct"] > 0 else "#00ff7f" if res["pct"] < 0 else "#ccc"
         
-        status_label = "⚪ 監控中"
-        if abs(res["pct"]) >= st.session_state.tg_threshold and not s_state["alerted"]:
-            mom_txt = fetch_momentum_finmind(stock["id"], res["pct"], st.session_state.tg_threshold)
-            msg = f"🔔 <b>【價格異動】</b>\n標的：{stock['name']}({stock['id']})\n股價：{res['price']}\n漲跌：{res['pct']:.2f}%{mom_txt}"
-            send_telegram(msg)
-            s_state.update({"alerted": True, "time": now_tw().strftime("%H:%M")})
-            save_alert_state(bid, alert_state)
+        # 通知邏輯
+        alert_state = load_alert_state(browser_id)
+        s_alert = alert_state["states"].setdefault(sid, {"alerted": False})
+        alert_label = "⚪ 監控中"
         
-        if s_state["alerted"]:
+        if abs(res["pct"]) >= st.session_state.tg_threshold and not s_alert["alerted"]:
+            msg = f"🔔 【異動通知】\n標的：{name}({sid})\n股價：{res['price']}\n漲跌：{res['pct']:.2f}%"
+            try: requests.post(f"https://api.telegram.org/bot{st.session_state.tg_token}/sendMessage", json={"chat_id": st.session_state.tg_chat_id, "text": msg})
+            except: pass
+            s_alert.update({"alerted": True, "time": now_tw().strftime("%H:%M")})
+            save_alert_state(browser_id, alert_state)
+            
+        if s_alert["alerted"]:
             if abs(res["pct"]) <= st.session_state.tg_reset:
-                s_state["alerted"] = False
-                save_alert_state(bid, alert_state)
-            else: status_label = f"✅ 已通知 ({s_state.get('time')})"
+                s_alert["alerted"] = False
+                save_alert_state(browser_id, alert_state)
+            else: alert_label = f"✅ 已通知 ({s_alert.get('time')})"
 
-        # --- HTML 卡片渲染 (保持您原本的格式) ---
-        st.info(f"{stock['name']} ({stock['id']}) - 股價: {res['price']} ({res['pct']:.2f}%) | 評級: {res['grade']} | {status_label}")
-        # (此處建議嵌入您原本的 card_html 程式碼塊以維持美觀)
+        # HTML 卡片
+        st.markdown(f"""
+        <div class="stock-card">
+            <div class="card-header">
+                <div style="font-size:1.2rem; font-weight:700;">{name} <small>({sid})</small></div>
+                <div class="card-price" style="color:{pct_color};">{res['price']:.2f} <small style="font-size:1rem;">({res['pct']:+.2f}%)</small></div>
+            </div>
+            <div style="margin-top:10px;">
+                <span class="badge" style="background:rgba(99,179,237,0.2); color:#63b3ed;">{res['grade']}</span>
+                <span class="action-{res['color']}">{res['action']}</span>
+                <span style="float:right; font-size:0.8rem; opacity:0.5;">{res['source']}</span>
+            </div>
+            <div style="margin-top:8px; font-size:0.9rem; opacity:0.8;">
+                指標：{' '.join(res['details']) if res['details'] else '無'} | KD: K={res['k']:.1f} D={res['d']:.1f}
+            </div>
+            <div style="margin-top:5px; font-size:0.85rem; color:#a0aec0;">{alert_label}</div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # 操作按鈕
+        b1, b2, b3, _ = st.columns([1,1,1,4])
+        if b1.button("🗑️", key=f"del_{sid}"):
+            st.session_state.my_stocks.pop(idx)
+            save_user_stocks(browser_id, st.session_state.my_stocks)
+            st.rerun()
+        if b2.button("↑", key=f"up_{sid}") and idx > 0:
+            st.session_state.my_stocks[idx], st.session_state.my_stocks[idx-1] = st.session_state.my_stocks[idx-1], st.session_state.my_stocks[idx]
+            save_user_stocks(browser_id, st.session_state.my_stocks)
+            st.rerun()
+        if b3.button("↓", key=f"dn_{sid}") and idx < len(st.session_state.my_stocks)-1:
+            st.session_state.my_stocks[idx], st.session_state.my_stocks[idx+1] = st.session_state.my_stocks[idx+1], st.session_state.my_stocks[idx]
+            save_user_stocks(browser_id, st.session_state.my_stocks)
+            st.rerun()
+
+# 側邊欄設定
+with st.sidebar:
+    st.header("⚙️ 系統設定")
+    st.session_state.tg_token = st.text_input("TG Bot Token", type="password", value=st.session_state.tg_token)
+    st.session_state.tg_chat_id = st.text_input("TG Chat ID", value=st.session_state.tg_chat_id)
+    st.session_state.tg_threshold = st.number_input("觸發門檻%", value=st.session_state.tg_threshold)
+    st.session_state.tg_reset = st.number_input("重置門檻%", value=st.session_state.tg_reset)
+    if st.button("💾 儲存設定"): st.success("設定已更新")
 
 # 自動重新整理
 if is_market_open():
