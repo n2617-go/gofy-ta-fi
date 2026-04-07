@@ -29,7 +29,7 @@ def is_market_open() -> bool:
     return MARKET_OPEN <= n.time() <= MARKET_CLOSE
 
 # ===========================================================================
-# --- 1. 使用者與組態管理 ---
+# --- 1. 使用者管理 ---
 # ===========================================================================
 def get_browser_id_component():
     components.html(f"""
@@ -74,60 +74,71 @@ def load_config() -> dict:
     return {"finmind_token": "", "tg_token": "", "tg_chat_id": ""}
 
 # ===========================================================================
-# --- 2. 核心抓取邏輯 (針對 400 錯誤優化) ---
+# --- 2. 終極修復報價邏輯 (針對 400 錯誤優化) ---
 # ===========================================================================
 @st.cache_data(ttl=30)
-def fetch_finmind_diag(token: str) -> tuple:
-    """
-    回傳 (數據字典, 狀態標籤, 錯誤詳細訊息)
-    """
-    url = "https://api.finmindtrade.com/api/v4/taiwan_stock_tick_snapshot"
+def fetch_finmind_api_v4(token: str) -> tuple:
+    """直接使用 Requests 存取 V4 API，並進行深度診斷"""
+    api_url = "https://api.finmindtrade.com/api/v4/taiwan_stock_tick_snapshot"
     
-    # 優化：如果 token 為空，完全不要傳入該參數，避免 API 報 400
+    # 這裡很關鍵：去除 Token 前後的隱形換行或空白
+    clean_token = token.strip() if token else ""
+    
+    # 建立參數字典：只有當 Token 有長度時才加入
     params = {}
-    if token and len(token.strip()) > 0:
-        params["token"] = token.strip()
+    if clean_token:
+        params["token"] = clean_token
     
     try:
-        resp = requests.get(url, params=params, timeout=10)
+        # 使用 verify=True 確保安全性，增加 timeout 避免卡死
+        response = requests.get(api_url, params=params, timeout=10)
         
-        # 診斷 HTTP 狀態碼
-        if resp.status_code == 400:
-            return {}, "❌ 快照階段錯誤 (400)", "請求格式錯誤：請檢查 Token 是否包含非法字元或 API 參數不支援。"
-        if resp.status_code == 403:
-            return {}, "❌ Token 階段錯誤 (403)", "無權限：您的 Token 可能無效、過期或輸入錯誤。"
-        if resp.status_code != 200:
-            return {}, f"❌ 連線錯誤 ({resp.status_code})", f"伺服器回傳異常代碼。"
-
-        res_json = resp.json()
-        data_list = res_json.get("data", [])
-        
-        if not data_list:
-            # 有些 API 成功但 data 為空會回傳 msg
-            api_msg = res_json.get("msg", "無資料內容")
-            return {}, "⚠️ API 回傳空值", f"連線成功但無數據：{api_msg}"
+        # 診斷 HTTP 狀態
+        status = response.status_code
+        if status == 400:
+            # 嘗試抓取 API 給出的具體錯誤原因
+            try:
+                err_detail = response.json().get("msg", "參數格式錯誤")
+            except:
+                err_detail = "API 拒絕請求 (可能是 Token 包含特殊非法字元)"
+            return {}, f"❌ 快照階段錯誤 (400)", err_detail
             
-        result = {}
-        for row in data_list:
-            sid = str(row.get("stock_id", ""))
+        if status == 403:
+            return {}, "❌ Token 階段錯誤 (403)", "無權限：請檢查 Token 是否複製完整或已過期。"
+            
+        if status != 200:
+            return {}, f"❌ 連線異常 ({status})", "伺服器暫時無法回應。"
+
+        # 解析資料
+        res_data = response.json()
+        raw_list = res_data.get("data", [])
+        
+        if not raw_list:
+            return {}, "⚠️ 暫無數據", "連線成功，但 API 目前未回傳任何股票快照。"
+            
+        # 轉換成 ID 對應的字典
+        quotes = {}
+        for item in raw_list:
+            sid = str(item.get("stock_id", ""))
             if sid:
-                result[sid] = {
-                    "price": float(row.get("close", 0)),
-                    "pct": float(row.get("change_rate", 0)),
+                quotes[sid] = {
+                    "price": float(item.get("close", 0)),
+                    "pct": float(item.get("change_rate", 0)),
                     "source": "FinMind API"
                 }
-        return result, "✅ FinMind 連線正常", ""
+        return quotes, "✅ FinMind 運作正常", ""
         
     except Exception as e:
-        return {}, "❌ 系統異常", str(e)
+        return {}, "❌ 系統錯誤", str(e)
 
-def get_yfinance_backup(sid: str):
+def fetch_yfinance_backup(sid: str):
+    """Yahoo Finance 最後防線"""
     try:
-        t = yf.Ticker(f"{sid}.TW")
-        info = t.fast_info
+        ticker = yf.Ticker(f"{sid}.TW")
+        fast = ticker.fast_info
         return {
-            "price": round(info.last_price, 2),
-            "pct": round(((info.last_price - info.previous_close) / info.previous_close) * 100, 2),
+            "price": round(fast.last_price, 2),
+            "pct": round(((fast.last_price - fast.previous_close) / fast.previous_close) * 100, 2),
             "source": "yfinance 備援"
         }
     except:
@@ -136,7 +147,7 @@ def get_yfinance_backup(sid: str):
 # ===========================================================================
 # --- 3. UI 介面 ---
 # ===========================================================================
-st.set_page_config(page_title="台股監控-修復版", layout="centered")
+st.set_page_config(page_title="台股監控-終極修復", layout="centered")
 
 if "initialized" not in st.session_state:
     cfg = load_config()
@@ -152,67 +163,75 @@ if not browser_id: st.stop()
 
 # --- Sidebar ---
 with st.sidebar:
-    st.header("⚙️ 系統設定")
-    fm_token_input = st.text_input("FinMind Token", value=st.session_state.finmind_token, type="password")
-    if st.button("確認並重整"):
-        st.session_state.finmind_token = fm_token_input.strip()
+    st.header("⚙️ 設定中心")
+    new_fm_token = st.text_input("FinMind API Token", value=st.session_state.finmind_token, type="password", help="請從 FinMind 官網複製 Token")
+    
+    if st.button("💾 儲存並強制重整"):
+        st.session_state.finmind_token = new_fm_token.strip()
+        # 同步到檔案
         cfg = load_config()
         cfg["finmind_token"] = st.session_state.finmind_token
-        with open(TG_SAVE_FILE, "w", encoding="utf-8") as f: json.dump(cfg, f)
-        st.cache_data.clear()
+        with open(TG_SAVE_FILE, "w", encoding="utf-8") as f:
+            json.dump(cfg, f)
+        st.cache_data.clear() # 關鍵：清除舊的 400 錯誤緩存
         st.rerun()
 
-st.title("🤖 台股監控與診斷系統")
+# --- 抓取與診斷 ---
+st.title("🤖 台股決策監控系統")
 
-# --- 執行抓取與診斷 ---
-all_quotes, status_tag, diag_msg = fetch_finmind_diag(st.session_state.finmind_token)
+# 這裡執行最新的 API 抓取邏輯
+all_quotes, status_tag, err_detail = fetch_finmind_api_v4(st.session_state.finmind_token)
 
-# 顯示診斷結果
+# 狀態提示區
 if "✅" in status_tag:
-    st.success(f"{status_tag}")
+    st.success(f"**{status_tag}**")
 else:
-    st.error(f"{status_tag}")
-    if diag_msg:
-        st.caption(f"診斷訊息: {diag_msg}")
+    st.error(f"**{status_tag}**")
+    if err_detail:
+        st.info(f"💡 錯誤原因解析：{err_detail}")
 
 # --- 新增股票 ---
-with st.expander("➕ 新增關注股票"):
+with st.expander("➕ 新增關注股票", expanded=False):
     c1, c2, c3 = st.columns([2, 2, 1])
-    n_id = c1.text_input("代號")
-    n_name = c2.text_input("名稱")
-    if c3.button("新增"):
+    n_id = c1.text_input("股票代號", placeholder="例如: 2330")
+    n_name = c2.text_input("股票名稱", placeholder="例如: 台積電")
+    if c3.button("新增", use_container_width=True):
         if n_id and n_name:
             st.session_state.my_stocks.append({"id": n_id, "name": n_name})
             save_user_stocks(browser_id, st.session_state.my_stocks)
             st.rerun()
 
 # --- 卡片渲染 ---
+st.subheader("📋 我的監控清單")
 for idx, stock in enumerate(st.session_state.my_stocks):
     sid, sname = stock["id"], stock["name"]
     
+    # 優先嘗試 API 數據，失敗才進備援
     q = all_quotes.get(sid)
     if not q:
-        q = get_yfinance_backup(sid)
+        q = fetch_yfinance_backup(sid)
     
     with st.container(border=True):
         if q:
             price, pct, src = q["price"], q["pct"], q["source"]
             color = "#ff4b4b" if pct > 0 else "#00ba8b" if pct < 0 else "#31333F"
+            arr = "▲" if pct > 0 else "▼" if pct < 0 else "─"
             
-            col_l, col_r, col_btn = st.columns([3, 3, 2])
-            with col_l:
-                st.markdown(f"### {sname}")
-                st.caption(f"`{sid}` | 來源: `{src}`")
-            with col_r:
+            c_info, c_price, c_del = st.columns([3, 3, 2])
+            with c_info:
+                st.markdown(f"#### {sname}")
+                st.caption(f"代號: `{sid}`")
+                st.caption(f"來源: `{src}`")
+            with c_price:
                 st.markdown(f"<h2 style='color:{color}; text-align:right; margin:0;'>{price}</h2>", unsafe_allow_html=True)
-                st.markdown(f"<p style='color:{color}; text-align:right; margin:0;'>{pct}%</p>", unsafe_allow_html=True)
-            with col_btn:
+                st.markdown(f"<p style='color:{color}; text-align:right; margin:0;'>{arr} {abs(pct)}%</p>", unsafe_allow_html=True)
+            with c_del:
                 if st.button("🗑️", key=f"del_{sid}", use_container_width=True):
                     st.session_state.my_stocks.pop(idx)
                     save_user_stocks(browser_id, st.session_state.my_stocks)
                     st.rerun()
         else:
-            st.warning(f"⚠️ {sname} ({sid}) 暫無數據")
+            st.warning(f"⚠️ {sname} ({sid}) 資料暫時無法取得")
 
 if is_market_open():
     components.html("<script>setTimeout(function(){window.parent.location.reload();}, 60000);</script>", height=0)
