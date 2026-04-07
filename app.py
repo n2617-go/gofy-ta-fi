@@ -29,7 +29,7 @@ def is_market_open() -> bool:
     return MARKET_OPEN <= n.time() <= MARKET_CLOSE
 
 # ===========================================================================
-# --- 1. 使用者管理 ---
+# --- 1. 使用者管理與初始化 ---
 # ===========================================================================
 def get_browser_id_component():
     components.html(f"""
@@ -73,31 +73,39 @@ def load_config():
         except: pass
     return {"finmind_token": ""}
 
+# 初始化 Session State (必須放在最前面)
+if "api_logs" not in st.session_state:
+    st.session_state.api_logs = []
+if "initialized" not in st.session_state:
+    cfg = load_config()
+    st.session_state.update({**cfg, "initialized": True, "my_stocks": []})
+
 # ===========================================================================
-# --- 2. 診斷式數據抓取 ---
+# --- 2. 診斷式數據抓取邏輯 ---
 # ===========================================================================
-def add_api_log(msg):
-    """將 API 觸發紀錄存入 Session State"""
-    if "api_logs" not in st.session_state:
-        st.session_state.api_logs = []
+def add_log(msg):
     time_str = now_tw().strftime("%H:%M:%S")
     st.session_state.api_logs.insert(0, f"[{time_str}] {msg}")
-    # 只保留最近 10 筆
-    st.session_state.api_logs = st.session_state.api_logs[:10]
+    st.session_state.api_logs = st.session_state.api_logs[:15] # 保留15筆
 
-def fetch_data_with_diag(sid: str, token: str):
-    """嘗試單一快照並記錄過程"""
-    # --- 嘗試 FinMind ---
-    if token:
+def fetch_stock_with_diag(sid: str, token: str):
+    """
+    1. 嘗試 FinMind 單一快照
+    2. 失敗則嘗試 yfinance
+    """
+    clean_token = token.strip() if token else ""
+    
+    # --- Step A: FinMind ---
+    if clean_token:
         try:
             url = "https://api.finmindtrade.com/api/v4/taiwan_stock_tick_snapshot"
-            params = {"token": token, "stock_id": sid}
+            params = {"token": clean_token, "stock_id": sid}
             resp = requests.get(url, params=params, timeout=5)
             
             if resp.status_code == 200:
                 data = resp.json().get("data", [])
                 if data:
-                    add_api_log(f"FinMind 成功: {sid}")
+                    add_log(f"✅ FinMind 成功: {sid}")
                     row = data[0]
                     return {
                         "price": float(row.get("close", 0)),
@@ -105,16 +113,17 @@ def fetch_data_with_diag(sid: str, token: str):
                         "source": "FinMind (即時)"
                     }
                 else:
-                    add_api_log(f"FinMind 空值: {sid} (查無資料)")
+                    add_log(f"⚠️ FinMind 空值: {sid} (查無資料)")
             else:
-                reason = resp.json().get("msg", "未知錯誤")
-                add_api_log(f"FinMind 失敗: {sid} (Code: {resp.status_code}, {reason})")
+                # 這裡會抓到您提到的 400 錯誤與具體原因
+                err_msg = resp.json().get("msg", "未知錯誤")
+                add_log(f"❌ FinMind 失敗: {sid} ({resp.status_code}: {err_msg})")
         except Exception as e:
-            add_api_log(f"FinMind 異常: {sid} ({str(e)})")
+            add_log(f"📡 FinMind 連線異常: {sid} ({str(e)})")
     
-    # --- 備援 yfinance ---
+    # --- Step B: yfinance ---
+    add_log(f"🔄 啟動 yfinance 備援: {sid}")
     try:
-        add_api_log(f"觸發 yfinance 備援: {sid}")
         for suffix in [".TW", ".TWO"]:
             t = yf.Ticker(f"{sid}{suffix}")
             fast = t.fast_info
@@ -126,19 +135,17 @@ def fetch_data_with_diag(sid: str, token: str):
                     "pct": round(((p - pc) / pc) * 100, 2),
                     "source": f"yfinance ({'延遲' if suffix=='.TW' else '即時'})"
                 }
-    except:
-        pass
+    except Exception as e:
+        add_log(f"❌ yfinance 也失敗: {sid} ({str(e)})")
+        
     return None
 
 # ===========================================================================
-# --- 3. UI 介面 ---
+# --- 3. UI 渲染 ---
 # ===========================================================================
-st.set_page_config(page_title="台股決策-API診斷版", layout="centered")
+st.set_page_config(page_title="台股監控-日誌加強版", layout="centered")
 
-if "initialized" not in st.session_state:
-    cfg = load_config()
-    st.session_state.update({**cfg, "initialized": True, "my_stocks": [], "api_logs": []})
-
+# 瀏覽器 ID 處理
 browser_id = st.query_params.get("bid", "")
 if browser_id and st.session_state.get("last_bid") != browser_id:
     st.session_state.my_stocks = load_user_stocks(browser_id)
@@ -149,56 +156,74 @@ if not browser_id: st.stop()
 
 # --- Sidebar ---
 with st.sidebar:
-    st.header("⚙️ 設定")
-    fm_token = st.text_input("FinMind Token", value=st.session_state.finmind_token, type="password")
-    if st.button("儲存 Token"):
-        st.session_state.finmind_token = fm_token.strip()
-        cfg = {"finmind_token": st.session_state.finmind_token}
+    st.header("⚙️ 系統設定")
+    fm_token_input = st.text_input("FinMind Token", value=st.session_state.finmind_token, type="password")
+    if st.button("儲存並重新連線"):
+        st.session_state.finmind_token = fm_token_input.strip()
         with open(TG_SAVE_FILE, "w", encoding="utf-8") as f:
-            json.dump(cfg, f)
+            json.dump({"finmind_token": st.session_state.finmind_token}, f)
+        st.session_state.api_logs = [] # 清空日誌重新開始
         st.rerun()
-    
     st.divider()
-    st.subheader("📡 API 實時診斷日誌")
-    for log in st.session_state.api_logs:
-        st.caption(log)
+    st.write("目前狀態：", "🟢 盤中監控中" if is_market_open() else "⚪ 非交易時段")
 
-st.title("🤖 台股監控診斷系統")
+st.title("🤖 台股監控與 API 診斷")
 
 # --- 新增股票 ---
-with st.expander("➕ 新增股票", expanded=False):
+with st.expander("➕ 新增股票到清單"):
     c1, c2, c3 = st.columns([2, 2, 1])
-    n_id = c1.text_input("代號")
-    n_name = c2.text_input("名稱")
+    n_id = c1.text_input("代號", placeholder="2330")
+    n_name = c2.text_input("名稱", placeholder="台積電")
     if c3.button("新增"):
         if n_id and n_name:
             st.session_state.my_stocks.append({"id": n_id, "name": n_name})
             save_user_stocks(browser_id, st.session_state.my_stocks)
             st.rerun()
 
-# --- 列表渲染 ---
+# --- 股票列表 ---
+st.subheader("📋 即時報價清單")
 for idx, stock in enumerate(st.session_state.my_stocks):
     sid, sname = stock["id"], stock["name"]
-    q = fetch_data_with_diag(sid, st.session_state.finmind_token)
+    
+    # 執行抓取
+    q = fetch_stock_with_diag(sid, st.session_state.finmind_token)
     
     with st.container(border=True):
         if q:
             price, pct, src = q["price"], q["pct"], q["source"]
             color = "#ff4b4b" if pct > 0 else "#00ba8b" if pct < 0 else "#31333F"
-            c_l, c_r, c_btn = st.columns([4, 3, 2])
+            
+            c_l, c_r, c_del = st.columns([4, 3, 2])
             with c_l:
                 st.markdown(f"#### {sname} `{sid}`")
-                st.caption(f"數據來源: `{src}`")
+                st.caption(f"來源: {src}")
             with c_r:
                 st.markdown(f"<h2 style='color:{color}; text-align:right; margin:0;'>{price}</h2>", unsafe_allow_html=True)
                 st.markdown(f"<p style='color:{color}; text-align:right; margin:0;'>{pct}%</p>", unsafe_allow_html=True)
-            with c_btn:
+            with c_del:
                 if st.button("🗑️", key=f"del_{sid}", use_container_width=True):
                     st.session_state.my_stocks.pop(idx)
                     save_user_stocks(browser_id, st.session_state.my_stocks)
                     st.rerun()
         else:
-            st.error(f"❌ {sname} ({sid}) 無法取得資料")
+            st.error(f"❌ {sname} ({sid}) 無法取得資料，請見下方診斷日誌。")
+
+# ===========================================================================
+# --- 4. 診斷日誌區 (放在最下方最明顯) ---
+# ===========================================================================
+st.divider()
+with st.expander("📡 API 診斷日誌 (點擊展開)", expanded=True):
+    if not st.session_state.api_logs:
+        st.write("尚無連線紀錄...")
+    else:
+        for log in st.session_state.api_logs:
+            # 根據關鍵字著色
+            if "成功" in log:
+                st.write(f"🟢 {log}")
+            elif "失敗" in log or "異常" in log:
+                st.write(f"🔴 {log}")
+            else:
+                st.write(f"⚪ {log}")
 
 # 自動更新
 if is_market_open():
