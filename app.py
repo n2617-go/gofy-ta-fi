@@ -6,7 +6,7 @@ import pytz
 import json
 import os
 import streamlit.components.v1 as components
-from datetime import datetime, time as dt_time
+from datetime import datetime, time as dt_time, timedelta
 
 # ===========================================================================
 # --- 0. 基礎設定 ---
@@ -66,89 +66,84 @@ def save_user_stocks(bid: str, stocks: list):
         json.dump(stocks, f, ensure_ascii=False, indent=2)
 
 # ===========================================================================
-# --- 2. 成交明細模擬快照邏輯 ---
+# --- 2. 終極數據抓取邏輯 (修正 422 錯誤) ---
 # ===========================================================================
 def add_log(msg):
     if "api_logs" not in st.session_state: st.session_state.api_logs = []
     st.session_state.api_logs.insert(0, f"[{now_tw().strftime('%H:%M:%S')}] {msg}")
     st.session_state.api_logs = st.session_state.api_logs[:10]
 
-@st.cache_data(ttl=600)
-def get_yesterday_close(sid, token):
-    """取得昨收價以計算漲跌幅 (緩存10分鐘以省 Token)"""
+@st.cache_data(ttl=3600) # 昨收價一小時更新一次即可
+def get_yesterday_close_safe(sid, token):
     url = "https://api.finmindtrade.com/api/v4/data"
+    # 抓取最近三天的日線，確保能拿到最後一筆交易日作為昨收
     params = {
         "dataset": "taiwan_stock_daily",
         "stock_id": sid,
-        "date": (now_tw().date()).strftime("%Y-%m-%d"),
+        "start_date": (now_tw() - timedelta(days=5)).strftime("%Y-%m-%d"),
         "token": token
     }
     try:
         resp = requests.get(url, params=params, timeout=5)
         data = resp.json().get("data", [])
-        if len(data) >= 2: # 抓最後兩筆，倒數第二筆是昨收
-            return data[-2].get("close")
-        elif len(data) == 1:
-            return data[0].get("close")
+        if len(data) >= 2:
+            return data[-2].get("close") # 倒數第二筆即為昨收
     except: pass
     return None
 
-def fetch_via_tick_data(sid, token):
-    """改抓成交明細 (taiwan_stock_tick) 取最後一筆"""
-    if not token: return None
-    
-    today = now_tw().strftime("%Y-%m-%d")
-    url = "https://api.finmindtrade.com/api/v4/data"
-    params = {
-        "dataset": "taiwan_stock_tick",
-        "stock_id": sid,
-        "date": today,
-        "token": token
-    }
-    
-    try:
-        resp = requests.get(url, params=params, timeout=7)
-        if resp.status_code == 200:
-            ticks = resp.json().get("data", [])
-            if ticks:
-                last_tick = ticks[-1] # 取得最新一筆成交
-                price = float(last_tick.get("close", 0))
-                
-                # 計算漲跌幅 (需比對昨收)
-                y_close = get_yesterday_close(sid, token)
-                pct = 0.0
-                if y_close:
-                    pct = round(((price - y_close) / y_close) * 100, 2)
-                
-                add_log(f"✅ FinMind 明細抓取成功: {sid}")
-                return {"price": price, "pct": pct, "source": "FinMind 明細 (最即時)"}
+def fetch_hybrid_data(sid, token):
+    """
+    修正後的抓取邏輯：
+    1. 嘗試 FinMind 明細 (加上 start_time 避免 422)
+    2. 若失敗則 yfinance
+    """
+    if token:
+        # 修正：加上 start_time 只抓取最近 10 分鐘的資料，避免 422 報錯
+        start_t = (now_tw() - timedelta(minutes=10)).strftime("%H:%M:%S")
+        url = "https://api.finmindtrade.com/api/v4/data"
+        params = {
+            "dataset": "taiwan_stock_tick",
+            "stock_id": sid,
+            "date": now_tw().strftime("%Y-%m-%d"),
+            "start_time": start_t,
+            "token": token
+        }
+        try:
+            resp = requests.get(url, params=params, timeout=5)
+            if resp.status_code == 200:
+                ticks = resp.json().get("data", [])
+                if ticks:
+                    last_p = float(ticks[-1].get("close", 0))
+                    y_close = get_yesterday_close_safe(sid, token)
+                    pct = round(((last_p - y_close) / y_close * 100), 2) if y_close else 0.0
+                    add_log(f"✅ FinMind 即時成功: {sid}")
+                    return {"price": last_p, "pct": pct, "source": "FinMind 即時明細"}
+                else:
+                    add_log(f"ℹ️ {sid} 近10分鐘無成交")
             else:
-                add_log(f"⚠️ {sid} 今日尚未有成交明細")
-        else:
-            add_log(f"❌ 明細接口錯誤: {sid} ({resp.status_code})")
-    except Exception as e:
-        add_log(f"📡 連線異常: {sid} ({str(e)})")
-    
-    # 失敗則進 yfinance
-    add_log(f"🔄 轉向 yfinance: {sid}")
+                add_log(f"❌ FinMind API 拒絕 ({resp.status_code})")
+        except: pass
+
+    # --- 備援系統 ---
+    add_log(f"🔄 使用 yfinance 數據: {sid}")
     try:
         t = yf.Ticker(f"{sid}.TW")
-        fast = t.fast_info
+        info = t.fast_info
         return {
-            "price": round(fast.last_price, 2),
-            "pct": round(((fast.last_price - fast.previous_close) / fast.previous_close) * 100, 2),
-            "source": "yfinance (備援)"
+            "price": round(info.last_price, 2),
+            "pct": round(((info.last_price - info.previous_close) / info.previous_close * 100), 2),
+            "source": "Yahoo Finance"
         }
     except: return None
 
 # ===========================================================================
-# --- 3. UI 介面 ---
+# --- 3. UI 渲染 ---
 # ===========================================================================
-st.set_page_config(page_title="台股監控-成交明細版", layout="centered")
+st.set_page_config(page_title="台股監控-終極修復版", layout="centered")
 
 if "initialized" not in st.session_state:
-    if os.path.exists("tg_config.json"):
-        with open("tg_config.json", "r") as f: cfg = json.load(f)
+    if os.path.exists(TG_SAVE_FILE):
+        with open(TG_SAVE_FILE, "r") as f: cfg = json.load(f)
     else: cfg = {"finmind_token": ""}
     st.session_state.update({**cfg, "initialized": True, "my_stocks": [], "api_logs": []})
 
@@ -160,43 +155,45 @@ if browser_id and st.session_state.get("last_bid") != browser_id:
 get_browser_id_component()
 if not browser_id: st.stop()
 
-st.title("🤖 台股監控 (成交明細版)")
+st.title("📈 台股實時監控系統")
 
+# --- 側邊欄 ---
 with st.sidebar:
-    st.header("⚙️ 設定")
-    fm_token = st.text_input("FinMind Token", value=st.session_state.finmind_token, type="password")
-    if st.button("儲存並重新整理"):
-        st.session_state.finmind_token = fm_token.strip()
-        with open("tg_config.json", "w") as f: json.dump({"finmind_token": fm_token}, f)
+    st.header("⚙️ 系統設定")
+    new_token = st.text_input("FinMind Token", value=st.session_state.finmind_token, type="password")
+    if st.button("儲存並更新"):
+        st.session_state.finmind_token = new_token.strip()
+        with open(TG_SAVE_FILE, "w") as f: json.dump({"finmind_token": new_token}, f)
         st.rerun()
+    st.divider()
+    st.subheader("📡 連線診斷")
+    for log in st.session_state.api_logs:
+        st.caption(log)
 
-# 顯示監控清單
+# --- 新增股票 ---
+with st.expander("➕ 新增關注股票"):
+    c1, c2, c3 = st.columns([2, 2, 1])
+    nid = c1.text_input("代號")
+    nname = c2.text_input("名稱")
+    if c3.button("新增"):
+        if nid and nname:
+            st.session_state.my_stocks.append({"id": nid, "name": nname})
+            save_user_stocks(browser_id, st.session_state.my_stocks)
+            st.rerun()
+
+# --- 股票卡片 ---
 for idx, stock in enumerate(st.session_state.my_stocks):
     sid, sname = stock["id"], stock["name"]
-    q = fetch_via_tick_data(sid, st.session_state.finmind_token)
+    q = fetch_hybrid_data(sid, st.session_state.finmind_token)
     
     with st.container(border=True):
         if q:
-            price, pct, src = q["price"], q["pct"], q["source"]
+            p, pct, src = q["price"], q["pct"], q["source"]
             color = "#ff4b4b" if pct > 0 else "#00ba8b" if pct < 0 else "#31333F"
             c1, c2, c3 = st.columns([4, 3, 2])
             with c1:
                 st.markdown(f"#### {sname} `{sid}`")
                 st.caption(f"來源: {src}")
             with c2:
-                st.markdown(f"<h2 style='color:{color}; text-align:right; margin:0;'>{price}</h2>", unsafe_allow_html=True)
-                st.markdown(f"<p style='color:{color}; text-align:right; margin:0;'>{pct}%</p>", unsafe_allow_html=True)
-            with c3:
-                if st.button("🗑️", key=f"del_{sid}"):
-                    st.session_state.my_stocks.pop(idx)
-                    save_user_stocks(browser_id, st.session_state.my_stocks)
-                    st.rerun()
-
-# 診斷日誌
-st.divider()
-with st.expander("📡 API 診斷日誌", expanded=True):
-    for log in st.session_state.api_logs:
-        st.write(log)
-
-if is_market_open():
-    components.html("<script>setTimeout(function(){window.parent.location.reload();}, 60000);</script>", height=0)
+                st.markdown(f"<h2 style='color:{color}; text-align:right; margin:0;'>{p}</h2>", unsafe_allow_html=True)
+                st.markdown(f"<p style='color:{color}; text-align:
