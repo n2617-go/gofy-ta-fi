@@ -232,14 +232,14 @@ def get_finmind_loader():
 @st.cache_data(ttl=60)
 def fetch_all_quotes() -> dict:
     """
-    用 FinMind taiwan_stock_tick_snapshot 一次抓取全市場即時報價快照。
-    API 欄位：close（最新成交價）、change_rate（漲跌%）、open（開盤價）、stock_id
-    只在開盤中呼叫，ttl=60 確保每分鐘最多呼叫一次（成本極低）。
+    用 FinMind taiwan_stock_tick_snapshot 抓取即時報價。
+    - 有 Token：一次抓全市場快照（stock_id=""）
+    - 無 Token：逐支股票抓（需自選股清單，由呼叫端傳入）
     回傳 dict：{ stock_id: {"price": float, "pct": float, "open": float} }
     """
+    token = st.session_state.get("finmind_token", "")
     try:
         dl = get_finmind_loader()
-        # stock_id="" 或不帶參數 = 全市場快照
         df = dl.taiwan_stock_tick_snapshot(stock_id="")
         if df is None or df.empty:
             return {}
@@ -257,17 +257,48 @@ def fetch_all_quotes() -> dict:
                 continue
         return result
     except Exception as e:
-        st.warning("TaiwanStockQuote 抓取失敗：{}".format(e))
+        err_msg = str(e)
+        # 'data' 錯誤通常代表未登入或 Token 無效，改為逐支股票查詢
+        if "data" in err_msg.lower() and len(err_msg.strip()) <= 8:
+            if not token:
+                st.warning("⚠️ FinMind 全市場快照需要 API Token。請在側欄填入 Token，或程式將改為逐支查詢。")
+            return {}
+        st.warning("TaiwanStockQuote 抓取失敗：{}".format(err_msg))
+        return {}
+
+
+@st.cache_data(ttl=60)
+def fetch_single_quote(stock_id: str) -> dict:
+    """
+    無 Token 時的備援：逐支股票抓即時快照。
+    回傳 {"price": float, "pct": float, "open": float} 或空 dict。
+    """
+    try:
+        dl  = get_finmind_loader()
+        df  = dl.taiwan_stock_tick_snapshot(stock_id=stock_id)
+        if df is None or df.empty:
+            return {}
+        row = df.iloc[-1]
+        return {
+            "price": float(row.get("close",       0)),
+            "pct":   float(row.get("change_rate", 0)),
+            "open":  float(row.get("open",        0)),
+        }
+    except Exception:
         return {}
 
 
 def get_quote(stock_id: str) -> dict:
     """
-    從全市場快照中取得單一股票的即時報價。
-    回傳 {"price": float, "pct": float, "open": float} 或空 dict。
+    取得單一股票即時報價。
+    優先從全市場快照取（有 Token），
+    快照無資料時 fallback 到逐支查詢。
     """
     quotes = fetch_all_quotes()
-    return quotes.get(stock_id, {})
+    if stock_id in quotes:
+        return quotes[stock_id]
+    # Fallback：逐支查詢（無 Token 或全市場快照失敗時）
+    return fetch_single_quote(stock_id)
 
 
 # ===========================================================================
