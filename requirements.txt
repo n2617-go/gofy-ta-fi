@@ -7,3 +7,4 @@ pytz
 tqdm
 ta
 extra-streamlit-components
+akshare
