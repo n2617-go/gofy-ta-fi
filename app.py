@@ -499,7 +499,24 @@ def run_afterhours_analysis(bid: str, stock: dict, pct: float,
     stock_id   = stock["id"]
     alert_state = load_alert_state(bid)
     states      = alert_state.setdefault("states", {})
-    s           = states.setdefault(stock_id, {})
+
+    # 取出既有狀態並補齊欄位，避免舊格式 JSON 造成 KeyError
+    existing = states.get(stock_id, {})
+    s = {
+        "alerted":       existing.get("alerted",       False),
+        "last_pct":      existing.get("last_pct",      0.0),
+        "alerted_at":    existing.get("alerted_at",    ""),
+        "momentum":      existing.get("momentum",      {}),
+        "ever_triggered":existing.get("ever_triggered",False),
+        "ah_impl":       existing.get("ah_impl",       ""),
+        "ah_date":       existing.get("ah_date",       ""),
+        "ah_threshold":  existing.get("ah_threshold",  None),
+        "ah_vol":        existing.get("ah_vol",        0),
+        "ah_mav5":       existing.get("ah_mav5",       0),
+        "ah_ratio":      existing.get("ah_ratio",      0),
+        "ah_data_date":  existing.get("ah_data_date",  ""),
+    }
+    states[stock_id] = s
 
     # ── 快取命中判斷：日期相同 且 門檻相同 才直接回傳 ──
     # 門檻改變時需重新計算（避免調整門檻後仍顯示舊結果）
@@ -752,10 +769,24 @@ def check_and_notify(bid: str, stock: dict, pct: float, res: dict,
     alert_state = load_alert_state(bid)
     stock_id    = stock["id"]
     states      = alert_state.setdefault("states", {})
-    s           = states.setdefault(stock_id, {
-        "alerted": False, "last_pct": 0.0, "alerted_at": "",
-        "momentum": {},
-    })
+
+    # 取出既有狀態，並補齊所有可能缺失的欄位（相容舊格式 JSON）
+    existing = states.get(stock_id, {})
+    s = {
+        "alerted":       existing.get("alerted",       False),
+        "last_pct":      existing.get("last_pct",      0.0),
+        "alerted_at":    existing.get("alerted_at",    ""),
+        "momentum":      existing.get("momentum",      {}),
+        "ever_triggered":existing.get("ever_triggered",False),
+        "ah_impl":       existing.get("ah_impl",       ""),
+        "ah_date":       existing.get("ah_date",       ""),
+        "ah_threshold":  existing.get("ah_threshold",  None),
+        "ah_vol":        existing.get("ah_vol",        0),
+        "ah_mav5":       existing.get("ah_mav5",       0),
+        "ah_ratio":      existing.get("ah_ratio",      0),
+        "ah_data_date":  existing.get("ah_data_date",  ""),
+    }
+    states[stock_id] = s   # 寫回（補齊欄位）
 
     abs_pct = abs(pct)
     label   = ""
