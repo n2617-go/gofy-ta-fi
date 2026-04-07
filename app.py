@@ -6,8 +6,7 @@ import pytz
 import json
 import os
 import streamlit.components.v1 as components
-from datetime import datetime, time as dt_time, timedelta
-from FinMind.data import DataLoader
+from datetime import datetime, time as dt_time
 
 # ===========================================================================
 # --- 0. 基礎設定 ---
@@ -30,7 +29,7 @@ def is_market_open() -> bool:
     return MARKET_OPEN <= n.time() <= MARKET_CLOSE
 
 # ===========================================================================
-# --- 1. 使用者與組態管理 ---
+# --- 1. 使用者管理 ---
 # ===========================================================================
 def get_browser_id_component():
     components.html(f"""
@@ -75,49 +74,43 @@ def load_config() -> dict:
     return {"finmind_token": "", "tg_token": "", "tg_chat_id": ""}
 
 # ===========================================================================
-# --- 2. 核心報價抓取（含診斷邏輯） ---
+# --- 2. 強化版報價抓取 (避開 'data' KeyError) ---
 # ===========================================================================
-def get_finmind_loader():
-    dl = DataLoader()
-    token = st.session_state.get("finmind_token", "").strip()
-    if token:
-        try:
-            dl.login_by_token(api_token=token)
-            st.session_state["fm_status"] = "✅ Token 登入成功"
-        except Exception as e:
-            st.session_state["fm_status"] = f"❌ Token 驗證失敗: {str(e)}"
-    else:
-        st.session_state["fm_status"] = "⚠️ 未輸入 Token (匿名模式)"
-    return dl
-
 @st.cache_data(ttl=30)
-def fetch_all_quotes_with_diag() -> tuple:
-    """回傳 (數據字典, 診斷訊息)"""
-    diag = {"status": "未知", "msg": ""}
+def fetch_finmind_api_direct(token: str) -> tuple:
+    """直接呼叫 FinMind API 避開 SDK Bug"""
+    url = "https://api.finmindtrade.com/api/v4/taiwan_stock_tick_snapshot"
+    params = {"token": token} if token else {}
+    
     try:
-        dl = get_finmind_loader()
-        df = dl.taiwan_stock_tick_snapshot(stock_id="")
+        resp = requests.get(url, params=params, timeout=10)
         
-        if df is None or df.empty:
-            diag["status"] = "快照失敗"
-            diag["msg"] = "API 回傳空值 (Empty DataFrame)"
-            return {}, diag
+        if resp.status_code == 403:
+            return {}, "❌ Token 權限不足 (403 Forbidden)"
+        if resp.status_code != 200:
+            return {}, f"❌ API 連線失敗 (Code: {resp.status_code})"
             
-        data = {str(row["stock_id"]): {
-            "price": float(row["close"]), 
-            "pct": float(row["change_rate"]), 
-            "source": "FinMind 全體快照"
-        } for _, row in df.iterrows()}
+        res_json = resp.json()
+        # 修正重點：手動檢查資料欄位，不依賴 SDK
+        data_list = res_json.get("data", [])
         
-        diag["status"] = "成功"
-        return data, diag
+        if not data_list:
+            return {}, "⚠️ API 回傳資料為空 (可能尚未更新)"
+            
+        result = {}
+        for row in data_list:
+            sid = str(row.get("stock_id", ""))
+            if sid:
+                result[sid] = {
+                    "price": float(row.get("close", 0)),
+                    "pct": float(row.get("change_rate", 0)),
+                    "source": "FinMind 直接 API"
+                }
+        return result, "✅ FinMind 運作正常"
     except Exception as e:
-        diag["status"] = "系統錯誤"
-        diag["msg"] = str(e)
-        return {}, diag
+        return {}, f"❌ 系統錯誤: {str(e)}"
 
-def get_fallback_quote(sid: str) -> dict:
-    """yfinance 備援"""
+def get_yfinance_quote(sid: str) -> dict:
     try:
         t = yf.Ticker(f"{sid}.TW")
         info = t.fast_info
@@ -132,9 +125,8 @@ def get_fallback_quote(sid: str) -> dict:
 # ===========================================================================
 # --- 3. UI 介面 ---
 # ===========================================================================
-st.set_page_config(page_title="台股監控-診斷版", layout="centered")
+st.set_page_config(page_title="台股監控-修復版", layout="centered")
 
-# 初始化
 if "initialized" not in st.session_state:
     cfg = load_config()
     st.session_state.update({**cfg, "initialized": True, "my_stocks": []})
@@ -147,13 +139,11 @@ if browser_id and st.session_state.get("last_bid") != browser_id:
 get_browser_id_component()
 if not browser_id: st.stop()
 
-# --- Sidebar 診斷面板 ---
+# --- Sidebar ---
 with st.sidebar:
-    st.header("🔍 系統診斷")
-    
-    # Token 輸入與確認
+    st.header("⚙️ 系統設定")
     fm_token_input = st.text_input("FinMind Token", value=st.session_state.finmind_token, type="password")
-    if st.button("確認並儲存 Token"):
+    if st.button("確認並儲存"):
         st.session_state.finmind_token = fm_token_input.strip()
         cfg = load_config()
         cfg["finmind_token"] = st.session_state.finmind_token
@@ -161,39 +151,34 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
-    # 顯示目前 Token 狀態
-    if "fm_status" in st.session_state:
-        st.info(st.session_state["fm_status"])
+st.title("🤖 台股決策系統 (API 修復版)")
 
-st.title("🤖 台股決策診斷系統")
+# --- 抓取資料與狀態顯示 ---
+all_quotes, status_msg = fetch_finmind_api_direct(st.session_state.finmind_token)
+
+if "✅" in status_msg:
+    st.success(status_msg)
+else:
+    st.warning(status_msg)
 
 # --- 新增股票 ---
-with st.expander("➕ 新增關注股票", expanded=False):
+with st.expander("➕ 新增關注股票"):
     c1, c2, c3 = st.columns([2, 2, 1])
-    n_id = c1.text_input("股票代號")
-    n_name = c2.text_input("簡稱")
+    n_id = c1.text_input("代號")
+    n_name = c2.text_input("名稱")
     if c3.button("新增"):
         if n_id and n_name:
             st.session_state.my_stocks.append({"id": n_id, "name": n_name})
             save_user_stocks(browser_id, st.session_state.my_stocks)
             st.rerun()
 
-# --- 抓取與顯示 ---
-all_quotes, diag_info = fetch_all_quotes_with_diag()
-
-# 顯示目前的快照抓取狀態
-if diag_info["status"] != "成功":
-    st.warning(f"⚠️ FinMind 快照不可用：{diag_info['msg']} (切換至備援機制)")
-else:
-    st.success("✅ FinMind 全體快照連線正常")
-
+# --- 顯示卡片 ---
 for idx, stock in enumerate(st.session_state.my_stocks):
     sid, sname = stock["id"], stock["name"]
     
-    # 邏輯：先看全體快照，沒有就去 yfinance
     q = all_quotes.get(sid)
     if not q:
-        q = get_fallback_quote(sid)
+        q = get_yfinance_quote(sid)
     
     with st.container(border=True):
         if q:
@@ -203,7 +188,7 @@ for idx, stock in enumerate(st.session_state.my_stocks):
             col_l, col_r, col_btn = st.columns([3, 3, 2])
             with col_l:
                 st.markdown(f"### {sname}")
-                st.caption(f"代號: {sid} | 來源: `{src}`")
+                st.caption(f"代號: `{sid}` | 來源: `{src}`")
             with col_r:
                 st.markdown(f"<h2 style='color:{color}; text-align:right; margin:0;'>{price}</h2>", unsafe_allow_html=True)
                 st.markdown(f"<p style='color:{color}; text-align:right; margin:0;'>{pct}%</p>", unsafe_allow_html=True)
@@ -213,7 +198,7 @@ for idx, stock in enumerate(st.session_state.my_stocks):
                     save_user_stocks(browser_id, st.session_state.my_stocks)
                     st.rerun()
         else:
-            st.error(f"❌ {sname} ({sid}) 完全抓不到數據")
+            st.error(f"❌ {sname} ({sid}) 暫無資料")
 
 # 自動更新
 if is_market_open():
