@@ -35,9 +35,6 @@ def is_market_open() -> bool:
     if n.weekday() >= 5: return False
     return MARKET_OPEN <= n.time() <= MARKET_CLOSE
 
-def today_str() -> str:
-    return now_tw().strftime("%Y-%m-%d")
-
 # ===========================================================================
 # --- 1. 使用者與資料儲存 ---
 # ===========================================================================
@@ -88,7 +85,7 @@ def load_tg_config() -> dict:
     return {"tg_token": "", "tg_chat_id": "", "tg_threshold": 3.0, "tg_reset": 1.0, "finmind_token": ""}
 
 # ===========================================================================
-# --- 2. 報價抓取核心 (強化版) ---
+# --- 2. 報價抓取核心 (新增來源標記) ---
 # ===========================================================================
 def get_finmind_loader():
     dl = DataLoader()
@@ -96,33 +93,46 @@ def get_finmind_loader():
     if token: dl.login_by_token(api_token=token)
     return dl
 
-@st.cache_data(ttl=30) # 縮短緩存時間至 30 秒
+@st.cache_data(ttl=30)
 def fetch_all_finmind_quotes() -> dict:
     try:
         dl = get_finmind_loader()
         df = dl.taiwan_stock_tick_snapshot(stock_id="")
         if df is not None and not df.empty:
-            return {str(row["stock_id"]): {"price": float(row["close"]), "pct": float(row["change_rate"]), "open": float(row["open"])} 
-                    for _, row in df.iterrows()}
+            return {str(row["stock_id"]): {
+                "price": float(row["close"]), 
+                "pct": float(row["change_rate"]), 
+                "source": "FinMind 全體快照"
+            } for _, row in df.iterrows()}
     except: pass
     return {}
 
-def get_single_quote_backup(sid: str) -> dict:
-    """如果 FinMind 失敗，改用 yfinance 當備援"""
+def get_backup_quote(sid: str) -> dict:
+    # 嘗試 1: FinMind 單檔抓取
+    try:
+        dl = get_finmind_loader()
+        df = dl.taiwan_stock_tick_snapshot(stock_id=sid)
+        if df is not None and not df.empty:
+            row = df.iloc[-1]
+            return {"price": float(row["close"]), "pct": float(row["change_rate"]), "source": "FinMind 單檔快照"}
+    except: pass
+
+    # 嘗試 2: yfinance 備援
     try:
         ticker = yf.Ticker(f"{sid}.TW")
         info = ticker.fast_info
         last_price = info.last_price
         prev_close = info.previous_close
         pct = round(((last_price - prev_close) / prev_close) * 100, 2)
-        return {"price": round(last_price, 2), "pct": pct, "open": info.open}
-    except:
-        return None
+        return {"price": round(last_price, 2), "pct": pct, "source": "yfinance 備援"}
+    except: pass
+    
+    return None
 
 # ===========================================================================
-# --- 3. 介面設定 ---
+# --- 3. 介面與顯示 ---
 # ===========================================================================
-st.set_page_config(page_title="台股決策系統", layout="centered")
+st.set_page_config(page_title="台股決策系統 (驗證版)", layout="centered")
 
 if "initialized" not in st.session_state:
     cfg = load_tg_config()
@@ -147,87 +157,60 @@ with st.sidebar:
         st.write(" ")
         if st.button("確認"):
             st.session_state.finmind_token = fm_token
-            # 儲存到檔案
             cfg = load_tg_config()
             cfg["finmind_token"] = fm_token
             with open(TG_SAVE_FILE, "w", encoding="utf-8") as f: json.dump(cfg, f)
             st.cache_data.clear()
             st.rerun()
-    
-    st.session_state.tg_token = st.text_input("Telegram Bot Token", value=st.session_state.tg_token)
-    st.session_state.tg_chat_id = st.text_input("Chat ID", value=st.session_state.tg_chat_id)
-    if st.button("儲存通知設定"):
-        cfg = load_tg_config()
-        cfg.update({"tg_token": st.session_state.tg_token, "tg_chat_id": st.session_state.tg_chat_id})
-        with open(TG_SAVE_FILE, "w", encoding="utf-8") as f: json.dump(cfg, f)
-        st.success("設定已儲存")
 
-st.title("🤖 台股 AI 技術決策系統")
+st.title("🤖 台股驗證版決策系統")
 
-# --- 股票輸入欄位 (恢復) ---
-with st.expander("➕ 新增關注股票", expanded=True):
+# --- 新增股票 ---
+with st.expander("➕ 新增關注股票"):
     c1, c2, c3 = st.columns([2, 2, 1])
-    new_id = c1.text_input("股票代號", placeholder="例如: 2330")
-    new_name = c2.text_input("股票簡稱", placeholder="例如: 台積電")
-    if c3.button("新增", use_container_width=True):
+    new_id = c1.text_input("代號")
+    new_name = c2.text_input("名稱")
+    if c3.button("新增"):
         if new_id and new_name:
-            if not any(s['id'] == new_id for s in st.session_state.my_stocks):
-                st.session_state.my_stocks.append({"id": new_id, "name": new_name})
-                save_user_stocks(browser_id, st.session_state.my_stocks)
-                st.rerun()
+            st.session_state.my_stocks.append({"id": new_id, "name": new_name})
+            save_user_stocks(browser_id, st.session_state.my_stocks)
+            st.rerun()
 
-# --- 渲染卡片 ---
-st.subheader("📋 我的追蹤清單")
+# --- 渲染卡片 (重點：顯示來源) ---
 all_fm_quotes = fetch_all_finmind_quotes()
-
-if not st.session_state.my_stocks:
-    st.info("清單目前是空的，請先新增股票。")
 
 for idx, stock in enumerate(st.session_state.my_stocks):
     sid, sname = stock["id"], stock["name"]
     
-    # 嘗試抓取報價 (FinMind -> yfinance)
+    # 判斷來源
     q = all_fm_quotes.get(sid)
     if not q:
-        q = get_single_quote_backup(sid)
+        q = get_backup_quote(sid)
     
     with st.container(border=True):
         if q:
-            price, pct = q["price"], q["pct"]
+            price, pct, src = q["price"], q["pct"], q["source"]
             color = "#ff4b4b" if pct > 0 else "#00ba8b" if pct < 0 else "#31333F"
-            arr = "▲" if pct > 0 else "▼" if pct < 0 else "─"
             
-            # 卡片標題區
-            col_t, col_p, col_ctrl = st.columns([3, 3, 2])
-            col_t.markdown(f"### {sname}\n`{sid}`")
-            col_p.markdown(f"<h2 style='color:{color}; text-align:right; margin:0;'>{price}</h2>", unsafe_allow_html=True)
-            col_p.markdown(f"<p style='color:{color}; text-align:right; margin:0;'>{arr} {abs(pct)}%</p>", unsafe_allow_html=True)
-            
-            # 操作按鈕
-            with col_ctrl:
-                if st.button("🗑️", key=f"del_{sid}", use_container_width=True):
+            c1, c2, c3 = st.columns([3, 3, 2])
+            with c1:
+                st.markdown(f"### {sname}")
+                st.caption(f"代號: {sid}")
+                # 顯示數據抓取來源標籤
+                st.markdown(f"🏷️ `{src}`")
+                
+            with c2:
+                st.markdown(f"<h2 style='color:{color}; text-align:right;'>{price}</h2>", unsafe_allow_html=True)
+                st.markdown(f"<p style='color:{color}; text-align:right;'>{pct}%</p>", unsafe_allow_html=True)
+                
+            with c3:
+                if st.button("🗑️", key=f"del_{sid}"):
                     st.session_state.my_stocks.pop(idx)
                     save_user_stocks(browser_id, st.session_state.my_stocks)
                     st.rerun()
-                
-                # 排序按鈕
-                b_u, b_d = st.columns(2)
-                if b_u.button("↑", key=f"up_{sid}", use_container_width=True) and idx > 0:
-                    st.session_state.my_stocks[idx], st.session_state.my_stocks[idx-1] = st.session_state.my_stocks[idx-1], st.session_state.my_stocks[idx]
-                    save_user_stocks(browser_id, st.session_state.my_stocks)
-                    st.rerun()
-                if b_d.button("↓", key=f"dn_{sid}", use_container_width=True) and idx < len(st.session_state.my_stocks)-1:
-                    st.session_state.my_stocks[idx], st.session_state.my_stocks[idx+1] = st.session_state.my_stocks[idx+1], st.session_state.my_stocks[idx]
-                    save_user_stocks(browser_id, st.session_state.my_stocks)
-                    st.rerun()
         else:
-            st.error(f"❌ {sname} ({sid}) 報價抓取失敗")
-            if st.button("刪除此項", key=f"del_err_{sid}"):
-                st.session_state.my_stocks.pop(idx)
-                save_user_stocks(browser_id, st.session_state.my_stocks)
-                st.rerun()
+            st.error(f"❌ {sname} ({sid}) 無法取得報價")
 
-# --- 自動刷新 ---
+# 自動重整
 if is_market_open():
     components.html("<script>setTimeout(function(){window.parent.location.reload();}, 60000);</script>", height=0)
-    st.toast("即時報價更新中...", icon="🔄")
