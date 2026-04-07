@@ -616,9 +616,17 @@ def get_history_cached(stock_id: str) -> pd.DataFrame:
         df.columns = df.columns.get_level_values(0)
     df = df.astype(float).ffill()
     df.index = pd.to_datetime(df.index).normalize()
-    yesterday = pd.Timestamp(today) - timedelta(days=1)
-    df = df[df.index <= yesterday]
-    cache[stock_id] = {"df": df, "cached_date": today}
+
+    if is_market_open():
+        # 開盤中：只取昨天以前，今日棒由 get_quote() 即時縫合
+        yesterday = pd.Timestamp(today) - timedelta(days=1)
+        df = df[df.index <= yesterday]
+        cache[stock_id] = {"df": df, "cached_date": today}
+    else:
+        # 非開盤（含收盤後）：包含今日收盤資料，直接顯示最新收盤價
+        # 不存入快取，每次重新整理都重抓確保收盤價最新
+        pass
+
     return df.copy()
 
 
@@ -633,7 +641,8 @@ def stitch_with_quote(hist_df: pd.DataFrame, stock_id: str) -> tuple:
     回傳 (df, source_label)
     """
     if not is_market_open():
-        return hist_df, "🗂 yfinance 歷史"
+        # 非開盤：hist_df 已包含今日收盤價，直接顯示
+        return hist_df, "🗂 yfinance（含今日收盤）"
 
     quote = get_quote(stock_id)
     if not quote:
@@ -721,6 +730,10 @@ def calc_indicators(df: pd.DataFrame):
 
 @st.cache_data(ttl=60)
 def fetch_and_analyze(stock_id: str):
+    # 非開盤時清除 hist_cache，確保收盤後能取得最新收盤價
+    if not is_market_open() and stock_id in st.session_state.get("hist_cache", {}):
+        del st.session_state.hist_cache[stock_id]
+
     hist_df       = get_history_cached(stock_id)
     if hist_df.empty:
         return None
