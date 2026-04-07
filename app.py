@@ -33,24 +33,14 @@ def now_tw() -> datetime:
 
 def is_market_open() -> bool:
     n = now_tw()
-    if n.weekday() >= 5:
-        return False
+    if n.weekday() >= 5: return False
     return MARKET_OPEN <= n.time() <= MARKET_CLOSE
-
-def is_after_hours() -> bool:
-    n    = now_tw()
-    t    = n.time()
-    wday = n.weekday()
-    if wday >= 5: return True
-    if t >= AFTERHOURS_START: return True
-    if t < MARKET_OPEN: return True
-    return False
 
 def today_str() -> str:
     return now_tw().strftime("%Y-%m-%d")
 
 # ===========================================================================
-# --- 1. 使用者識別 ---
+# --- 1. 使用者與資料儲存邏輯 ---
 # ===========================================================================
 def get_browser_id_component():
     components.html(f"""
@@ -74,9 +64,6 @@ def get_browser_id_component():
     </script>
     """, height=0)
 
-# ===========================================================================
-# --- 2. 使用者股票清單 ---
-# ===========================================================================
 def safe_bid(bid: str) -> str:
     return "".join(c for c in bid if c.isalnum() or c in "-_")[:64]
 
@@ -90,93 +77,40 @@ def load_user_stocks(bid: str) -> list:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, list): return data
-        except Exception: pass
+        except: pass
     return list(DEFAULT_STOCKS)
 
 def save_user_stocks(bid: str, stocks: list):
     try:
         with open(user_file(bid), "w", encoding="utf-8") as f:
             json.dump(stocks, f, ensure_ascii=False, indent=2)
-    except Exception: pass
+    except: pass
 
-# ===========================================================================
-# --- 3. 通知狀態管理 ---
-# ===========================================================================
-def alert_state_file(bid: str) -> str:
-    return os.path.join(ALERT_DIR, safe_bid(bid) + "_alert.json")
-
-def load_alert_state(bid: str) -> dict:
-    path = alert_state_file(bid)
-    today = today_str()
-    if os.path.exists(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if data.get("date") == today: return data
-        except Exception: pass
-    return {"date": today, "states": {}}
-
-def save_alert_state(bid: str, state: dict):
-    try:
-        with open(alert_state_file(bid), "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
-    except Exception: pass
-
-# ===========================================================================
-# --- 4. Telegram + FinMind 設定 ---
-# ===========================================================================
 def load_tg_config() -> dict:
     if os.path.exists(TG_SAVE_FILE):
         try:
             with open(TG_SAVE_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception: pass
-    return {
-        "tg_token": "", "tg_chat_id": "",
-        "tg_threshold": 3.0, "tg_reset": 1.0,
-        "finmind_token": "",
-    }
+        except: pass
+    return {"tg_token": "", "tg_chat_id": "", "tg_threshold": 3.0, "tg_reset": 1.0, "finmind_token": ""}
 
 def save_tg_config():
     with open(TG_SAVE_FILE, "w", encoding="utf-8") as f:
         json.dump({
-            "tg_token":      st.session_state.tg_token,
-            "tg_chat_id":    st.session_state.tg_chat_id,
-            "tg_threshold":  st.session_state.tg_threshold,
-            "tg_reset":      st.session_state.tg_reset,
+            "tg_token": st.session_state.tg_token,
+            "tg_chat_id": st.session_state.tg_chat_id,
+            "tg_threshold": st.session_state.tg_threshold,
+            "tg_reset": st.session_state.tg_reset,
             "finmind_token": st.session_state.finmind_token,
         }, f, ensure_ascii=False, indent=4)
 
 # ===========================================================================
-# --- 5. session_state 初始化 ---
-# ===========================================================================
-if "initialized" not in st.session_state:
-    tg_cfg = load_tg_config()
-    st.session_state.update({
-        "tg_token":      tg_cfg["tg_token"],
-        "tg_chat_id":    tg_cfg["tg_chat_id"],
-        "tg_threshold":  tg_cfg.get("tg_threshold", 3.0),
-        "tg_reset":      tg_cfg.get("tg_reset", 1.0),
-        "finmind_token": tg_cfg.get("finmind_token", ""),
-        "initialized":   True,
-        "hist_cache":    {},   
-        "quote_cache":   {},   
-        "my_stocks":     list(DEFAULT_STOCKS),
-    })
-
-browser_id = st.query_params.get("bid", "")
-if browser_id and st.session_state.get("stocks_loaded_bid") != browser_id:
-    st.session_state.my_stocks        = load_user_stocks(browser_id)
-    st.session_state.stocks_loaded_bid = browser_id
-
-# ===========================================================================
-# --- 6. FinMind 報價抓取 ---
+# --- 2. 報價抓取核心 ---
 # ===========================================================================
 def get_finmind_loader():
     dl = DataLoader()
     token = st.session_state.get("finmind_token", "")
-    if token:
-        dl.login_by_token(api_token=token)
+    if token: dl.login_by_token(api_token=token)
     return dl
 
 @st.cache_data(ttl=60)
@@ -184,22 +118,10 @@ def fetch_all_quotes() -> dict:
     try:
         dl = get_finmind_loader()
         df = dl.taiwan_stock_tick_snapshot(stock_id="")
-        if df is None or df.empty:
-            return {}
-        result = {}
-        for _, row in df.iterrows():
-            sid = str(row.get("stock_id", ""))
-            if not sid: continue
-            try:
-                result[sid] = {
-                    "price": float(row.get("close", 0)),
-                    "pct":   float(row.get("change_rate", 0)),
-                    "open":  float(row.get("open", 0))
-                }
-            except: continue
-        return result
-    except Exception as e:
-        return {}
+        if df is None or df.empty: return {}
+        return {str(row["stock_id"]): {"price": float(row["close"]), "pct": float(row["change_rate"]), "open": float(row["open"])} 
+                for _, row in df.iterrows()}
+    except: return {}
 
 @st.cache_data(ttl=60)
 def fetch_single_quote(stock_id: str) -> dict:
@@ -208,106 +130,114 @@ def fetch_single_quote(stock_id: str) -> dict:
         df = dl.taiwan_stock_tick_snapshot(stock_id=stock_id)
         if df is None or df.empty: return {}
         row = df.iloc[-1]
-        return {
-            "price": float(row.get("close", 0)),
-            "pct":   float(row.get("change_rate", 0)),
-            "open":  float(row.get("open", 0)),
-        }
+        return {"price": float(row["close"]), "pct": float(row["change_rate"]), "open": float(row["open"])}
     except: return {}
 
-def get_quote(stock_id: str) -> dict:
-    quotes = fetch_all_quotes()
-    if stock_id in quotes:
-        return quotes[stock_id]
-    return fetch_single_quote(stock_id)
-
 # ===========================================================================
-# --- 7. 動能與技術分析 (略，與原版邏輯相同但確保穩定) ---
+# --- 3. 通知發送與技術分析 ---
 # ===========================================================================
-def classify_short_implication(pct, ratio, tg_threshold):
-    is_up, is_down = pct >= tg_threshold, pct <= -tg_threshold
-    is_vol_up, is_vol_down = ratio >= 1.5, ratio < 1.0
-    if is_up and is_vol_up: return "🚀 短線意涵：帶量突破"
-    if is_up and is_vol_down: return "⚠️ 短線意涵：虛假拉抬"
-    if is_down and is_vol_up: return "💣 短線意涵：帶量殺盤"
-    if is_down and is_vol_down: return "🔍 短線意涵：洗盤觀察"
-    return ""
-
-def fetch_momentum_analysis(stock_id, pct=0.0, tg_threshold=3.0):
+def send_telegram_msg(msg: str):
+    token = st.session_state.get("tg_token")
+    chat_id = st.session_state.get("tg_chat_id")
+    if not token or not chat_id: return
     try:
-        dl = get_finmind_loader()
-        today = today_str()
-        df = dl.taiwan_stock_minute(stock_id=stock_id, start_date=today, end_date=today)
-        if df is None or df.empty: return {}
-        vol_col = next((c for c in ["volume", "Volume", "vol"] if c in df.columns), None)
-        if not vol_col: return {}
-        df = df.sort_values("date") if "date" in df.columns else df
-        df[vol_col] = pd.to_numeric(df[vol_col], errors="coerce").fillna(0)
-        recent = df.tail(6)
-        if len(recent) < 2: return {}
-        cur_vol, avg_vol = float(recent.iloc[-1][vol_col]), float(recent.iloc[:-1][vol_col].mean())
-        ratio = cur_vol / avg_vol if avg_vol > 0 else 0.0
-        label = "🔥 爆量" if ratio >= 2.0 else "📈 放量" if ratio >= 1.5 else "➡️ 正常" if ratio >= 1.0 else "📉 縮量"
-        return {
-            "cur_vol": int(cur_vol), "avg_vol": int(avg_vol), "ratio": round(ratio, 2),
-            "momentum_label": f"{label}（{ratio:.1f}倍）", "short_impl": classify_short_implication(pct, ratio, tg_threshold)
-        }
-    except: return {}
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        requests.post(url, data={"chat_id": chat_id, "text": msg}, timeout=5)
+    except: pass
 
-# (此處保留原程式碼中的 8-15 節邏輯，為節省篇幅僅修正規範 UI 部分)
+def get_tech_rating(df: pd.DataFrame):
+    if len(df) < 20: return "無資料", "N/A"
+    close = df['Close']
+    ma5, ma20 = close.rolling(5).mean().iloc[-1], close.rolling(20).mean().iloc[-1]
+    rsi = RSIIndicator(close, window=14).rsi().iloc[-1]
+    
+    if close.iloc[-1] > ma5 > ma20 and rsi > 50: return "Strong Buy", "🔥 強力看多"
+    if close.iloc[-1] > ma20: return "Buy", "📈 偏多"
+    if close.iloc[-1] < ma5 < ma20 and rsi < 50: return "Strong Sell", "💣 強力看空"
+    return "Neutral", "➡️ 中性觀察"
 
 # ===========================================================================
-# --- 16. 介面 (包含新增的 Token 確認按鈕) ---
+# --- 4. 主程式 UI ---
 # ===========================================================================
-st.set_page_config(page_title="台股決策系統 V7.6", layout="centered")
+st.set_page_config(page_title="台股決策系統", layout="centered")
 
-# CSS (略，保持您的美化設定)
-st.markdown("""<style>...</style>""", unsafe_allow_html=True) # 此處保持原有的 CSS 內容
+# 初始化 session_state
+if "initialized" not in st.session_state:
+    cfg = load_tg_config()
+    st.session_state.update({**cfg, "initialized": True, "my_stocks": []})
 
-st.title("🤖 台股 AI 技術分級決策支援")
+browser_id = st.query_params.get("bid", "")
+if browser_id and st.session_state.get("last_bid") != browser_id:
+    st.session_state.my_stocks = load_user_stocks(browser_id)
+    st.session_state.last_bid = browser_id
 
-if not browser_id:
-    get_browser_id_component()
-    st.info("⏳ 初始化中，請稍候...")
-    st.stop()
+get_browser_id_component()
+if not browser_id: st.stop()
 
-if is_market_open():
-    components.html("<script>setTimeout(function() { window.parent.location.reload(); }, 60000);</script>", height=0)
-    st.success("🟢 **開盤中** — 每 60 秒自動更新")
-else:
-    st.info(f"🔵 **非開盤時間** ({now_tw().strftime('%H:%M')})")
-
-# ── Sidebar ──
+# 側邊欄設定
 with st.sidebar:
-    st.header("⚙️ 設定")
-    st.subheader("📡 FinMind")
-    
-    # 增加輸入框與確認按鈕
-    col_t1, col_t2 = st.columns([3, 1])
-    with col_t1:
-        new_token = st.text_input("API Token", type="password", value=st.session_state.finmind_token)
-    with col_t2:
-        st.write("") # 佔位
-        st.write("") # 佔位
+    st.header("⚙️ 系統設定")
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        new_fm_token = st.text_input("FinMind Token", value=st.session_state.finmind_token, type="password")
+    with col2:
+        st.write(" ") 
+        st.write(" ") 
         if st.button("確認"):
-            st.session_state.finmind_token = new_token
+            st.session_state.finmind_token = new_fm_token
             save_tg_config()
-            st.cache_data.clear()
-            st.success("Token 已更新")
             st.rerun()
-            
-    st.divider()
-    st.subheader("🔔 Telegram 通知")
-    st.session_state.tg_token = st.text_input("Bot Token", type="password", value=st.session_state.tg_token)
-    st.session_state.tg_chat_id = st.text_input("Chat ID", value=st.session_state.tg_chat_id)
     
-    col_a, col_b = st.columns(2)
-    st.session_state.tg_threshold = col_a.number_input("觸發門檻 (%)", min_value=0.1, value=float(st.session_state.tg_threshold))
-    st.session_state.tg_reset = col_b.number_input("重置門檻 (%)", min_value=0.1, value=float(st.session_state.tg_reset))
-
-    if st.button("💾 儲存所有設定"):
+    st.session_state.tg_token = st.text_input("TG Bot Token", value=st.session_state.tg_token)
+    st.session_state.tg_chat_id = st.text_input("TG Chat ID", value=st.session_state.tg_chat_id)
+    if st.button("儲存通知設定"):
         save_tg_config()
         st.success("已儲存")
 
-# ── 主畫面其餘部分 (保持原有邏輯 fetch_and_analyze 並渲染卡片) ──
-# ... (此處代碼接續您原本的股票清單渲染邏輯)
+st.title("🤖 台股 AI 技術分級決策")
+
+# --- 新增股票輸入欄位 ---
+with st.expander("➕ 新增關注股票", expanded=True):
+    col_sid, col_name, col_btn = st.columns([2, 2, 1])
+    new_id = col_sid.text_input("股票代號 (如: 2330)")
+    new_name = col_name.text_input("簡稱 (如: 台積電)")
+    if col_btn.button("新增", use_container_width=True):
+        if new_id and new_name:
+            if not any(s['id'] == new_id for s in st.session_state.my_stocks):
+                st.session_state.my_stocks.append({"id": new_id, "name": new_name})
+                save_user_stocks(browser_id, st.session_state.my_stocks)
+                st.rerun()
+
+# --- 股票卡片渲染 ---
+all_quotes = fetch_all_quotes()
+
+for idx, stock in enumerate(st.session_state.my_stocks):
+    sid, sname = stock["id"], stock["name"]
+    q = all_quotes.get(sid) or fetch_single_quote(sid)
+    
+    with st.container(border=True):
+        if q:
+            price, pct = q["price"], q["pct"]
+            color = "#ff4b4b" if pct > 0 else "#00ba8b" if pct < 0 else "#31333F"
+            
+            c1, c2, c3 = st.columns([2, 2, 1])
+            c1.markdown(f"### {sname} ({sid})")
+            c2.markdown(f"<h2 style='color:{color}; text-align:right;'>{price} ({pct}%)</h2>", unsafe_allow_html=True)
+            
+            # 刪除與排序按鈕
+            if c3.button("🗑️", key=f"del_{sid}"):
+                st.session_state.my_stocks.pop(idx)
+                save_user_stocks(browser_id, st.session_state.my_stocks)
+                st.rerun()
+            
+            # 這裡可以加入您的 yfinance 技術分析邏輯 (與原本相同)
+            # 例如: df = yf.download(f"{sid}.TW", period="1mo")...
+        else:
+            st.warning(f"⚠️ {sname} ({sid}) 報價取得失敗，請檢查代號或 Token 限制。")
+            if st.button("刪除", key=f"del_err_{sid}"):
+                st.session_state.my_stocks.pop(idx)
+                save_user_stocks(browser_id, st.session_state.my_stocks)
+                st.rerun()
+
+if is_market_open():
+    components.html("<script>setTimeout(function(){window.parent.location.reload();}, 60000);</script>", height=0)
