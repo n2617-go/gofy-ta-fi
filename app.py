@@ -232,13 +232,15 @@ def get_finmind_loader():
 @st.cache_data(ttl=60)
 def fetch_all_quotes() -> dict:
     """
-    用 FinMind TaiwanStockQuote 一次抓取全市場即時報價快照。
+    用 FinMind taiwan_stock_tick_snapshot 一次抓取全市場即時報價快照。
+    API 欄位：close（最新成交價）、change_rate（漲跌%）、open（開盤價）、stock_id
     只在開盤中呼叫，ttl=60 確保每分鐘最多呼叫一次（成本極低）。
     回傳 dict：{ stock_id: {"price": float, "pct": float, "open": float} }
     """
     try:
         dl = get_finmind_loader()
-        df = dl.taiwan_stock_quote(stock_id="")   # 空字串 = 全市場
+        # stock_id="" 或不帶參數 = 全市場快照
+        df = dl.taiwan_stock_tick_snapshot(stock_id="")
         if df is None or df.empty:
             return {}
         result = {}
@@ -247,15 +249,15 @@ def fetch_all_quotes() -> dict:
             if not sid:
                 continue
             try:
-                price    = float(row.get("close",            row.get("price", 0)))
-                open_p   = float(row.get("open",             0))
-                chg_pct  = float(row.get("change_rate",      row.get("ChangeRate", 0)))
+                price   = float(row.get("close",       0))
+                open_p  = float(row.get("open",        0))
+                chg_pct = float(row.get("change_rate", 0))
                 result[sid] = {"price": price, "pct": chg_pct, "open": open_p}
             except Exception:
                 continue
         return result
     except Exception as e:
-        st.warning(f"TaiwanStockQuote 抓取失敗：{e}")
+        st.warning("TaiwanStockQuote 抓取失敗：{}".format(e))
         return {}
 
 
@@ -908,8 +910,8 @@ button[kind="secondary"] { padding: 2px 8px !important; font-size: 0.75rem !impo
 
 /* 排序/刪除按鈕放大 */
 [data-testid="stHorizontalBlock"] button {
-    font-size: 1.8rem !important;
-    height: 3.5rem !important;
+    font-size: 1.4rem !important;
+    height: 3rem !important;
     width: 100% !important;
     padding: 0 !important;
     line-height: 1 !important;
@@ -1223,7 +1225,7 @@ for idx, stock in enumerate(st.session_state.my_stocks):
         with st.container():
             st.markdown(card_html, unsafe_allow_html=True)
             # 強制橫向：用 use_container_width=False + gap 設為 small
-            b1, b2, b3, _ = st.columns([5, 5, 5, 5], gap="large")
+            b1, b2, b3, _ = st.columns([3, 3, 3, 3], gap="large")
             with b1:
                 if st.button("🗑", key="del_" + sid, use_container_width=True):
                     st.session_state.my_stocks.pop(idx)
